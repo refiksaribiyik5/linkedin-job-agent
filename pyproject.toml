@@ -9,11 +9,13 @@ description = "AI destekli, kisisel LinkedIn is ilani kesif ve degerlendirme sis
 requires-python = ">=3.12"
 authors = [{ name = "Refik Saribiyik" }]
 
-# V1 kapsaminda calisma zamani bagimliligi henuz yoktur: bu milestone (M0.1) yalnizca
-# paket/tooling iskeletini kurar. Playwright, SQLAlchemy, Pydantic, Anthropic SDK ve
-# APScheduler gibi TDD Section 2'de secilen bagimliliklar, onlari fiilen kullanan ilk
-# milestone'da (sirasiyla M3.1, M1.2, M1.1/M2.1, M5.1, M9.5) eklenir.
-dependencies = []
+# TDD Section 2'de secilen bagimliliklar, onlari fiilen kullanan ilk milestone'da
+# eklenir. Pydantic v2, M1.1'in domain modelleri icin eklenmistir. Playwright,
+# SQLAlchemy, Anthropic SDK ve APScheduler ise sirasiyla M3.1, M1.2, M5.1, M9.5'te
+# eklenecektir. TDD Section 26 geregi kilitli (pinned) surum kullanilir.
+dependencies = [
+    "pydantic==2.13.4",
+]
 
 # TDD Section 26 ("Baglilik hijyeni") geregi kilitli (pinned) surumler kullanilir.
 # Yeni bir surume gecis bilincli bir degisiklik olarak yapilir, otomatik surum
