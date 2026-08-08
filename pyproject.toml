@@ -15,6 +15,13 @@ authors = [{ name = "Refik Saribiyik" }]
 # APScheduler ise sirasiyla M3.1, M5.1, M9.5'te eklenecektir. TDD Section 26
 # geregi kilitli (pinned) surum kullanilir. psycopg (psycopg3), SQLAlchemy 2.x
 # ile onerilen modern PostgreSQL suruculugudur.
+#
+# NOT (uretim oncesi): "psycopg[binary]" kendi libpq/OpenSSL kopyasini
+# tasiyan onceden derlenmis bir wheel kullanir -- yerel gelistirme icin
+# rahat ve hizlidir, ancak gercek bir uretim dagitimindan once, sistemin
+# kendi libpq'suna baglanan kaynaktan derlenmis "psycopg" paketine
+# gecmek (guvenlik yamalarinin isletim sistemi seviyesinde yonetilmesini
+# saglar) bilincli olarak yeniden degerlendirilmelidir (bkz. Section 27).
 dependencies = [
     "pydantic==2.13.4",
     "sqlalchemy==2.0.51",
@@ -44,8 +51,20 @@ src = ["src"]
 # kapsami disinda tutulur (standart pratik).
 extend-exclude = ["migrations"]
 
+# "S" (flake8-bandit) M1.2'de eklendi: kod tabaninda artik ham SQL (text())
+# kullanimi var (kismi index WHERE kosullari, entegrasyon testleri); bu
+# kural seti, gelecekte string birlestirme/formatlama yoluyla SQL
+# enjeksiyonu riski tasiyan bir sorgu eklenirse erken uyari verir.
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "N"]
+select = ["E", "F", "I", "UP", "B", "SIM", "N", "S"]
+
+# S101 (assert kullanimi), pytest'in kendi dogrulama mekanizmasidir --
+# test dosyalarinda bir guvenlik riski degildir (bandit'in genel amacli,
+# uretim kodu icin anlamli olan bir kuralinin test kodundaki bilinen
+# yanlis-pozitifidir). Yalnizca tests/ icin devre disi birakilir; src/
+# altindaki uygulama kodu icin S kurallari tam olarak gecerli kalir.
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
