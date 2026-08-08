@@ -142,6 +142,31 @@ def test_load_account_context_raises_when_no_active_config_profile(
         load_account_context(account.account_id, db_session)
 
 
+def test_load_account_context_raises_when_only_an_inactive_config_profile_exists(
+    db_session: Session, account: AccountOrm
+):
+    # Ic-denetimde bulunan eksik: onceki test yalnizca "hic satir yok"
+    # senaryosunu kapsiyordu. Daha gerceci ve is_active=True FILTRESINI
+    # asil sinayan durum, INAKTIF bir satirin var olup HICBIR aktif
+    # satirin olmamasidir (orn. bir config versiyonu devre disi
+    # birakilmis ama yenisi henuz aktiflestirilmemis).
+    db_session.add(
+        UserProfileOrm(
+            account_id=account.account_id,
+            career_goals="Business Development",
+            skills_summary="Satis",
+            preferences_dealbreakers={"excluded_companies": [], "excluded_job_ids": []},
+        )
+    )
+    inactive_profile = _make_active_config_profile(account.account_id)
+    inactive_profile.is_active = False
+    db_session.add(inactive_profile)
+    db_session.flush()
+
+    with pytest.raises(ValueError, match="aktif bir config profili bulunamadi"):
+        load_account_context(account.account_id, db_session)
+
+
 def test_load_account_context_raises_config_validation_error_for_corrupted_db_row(
     db_session: Session, account: AccountOrm
 ):

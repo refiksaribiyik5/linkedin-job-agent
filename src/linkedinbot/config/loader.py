@@ -38,6 +38,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import Session
 
 from linkedinbot.config.validator import validate_config
@@ -76,18 +77,26 @@ def load_account_context(account_id: UUID, session: Session) -> AccountContext:
     if user_profile is None:
         raise ValueError(f"Bu hesap icin kullanici profili bulunamadi: {account_id}")
 
-    orm_config_profile = (
-        session.execute(
+    # `.one()` (`.first()` DEGIL) kasitli: `uq_account_config_profiles_one_active`
+    # kismi unique index'i (M1.2) bu hesap icin en fazla bir aktif satir
+    # olmasini zaten garanti eder - ama bu tek katmana (yalnizca DB
+    # kisitina) korlemesine guvenmek yerine, `.one()` bu degismezin
+    # ihlal edildigi (birden fazla aktif satir bulundugu, ciddi bir veri
+    # bütünlüğü hatasi) teorik durumda `.first()`'un yapacagi gibi
+    # rastgele/sessizce bir satir SECMEK yerine acikca (MultipleResultsFound
+    # ile) patlar - "sessizce yanlis olani secmek yerine acikca basarisiz
+    # ol" ilkesi (bkz. M1.2/M1.3'teki CHECK kisiti / extra="forbid" desenleri).
+    try:
+        orm_config_profile = session.execute(
             select(AccountConfigProfileOrm).where(
                 AccountConfigProfileOrm.account_id == account_id,
                 AccountConfigProfileOrm.is_active.is_(True),
             )
-        )
-        .scalars()
-        .first()
-    )
-    if orm_config_profile is None:
-        raise ValueError(f"Bu hesap icin aktif bir config profili bulunamadi: {account_id}")
+        ).scalar_one()
+    except NoResultFound as exc:
+        raise ValueError(
+            f"Bu hesap icin aktif bir config profili bulunamadi: {account_id}"
+        ) from exc
 
     config_profile = validate_config(
         {
