@@ -24,12 +24,21 @@ authors = [{ name = "Refik Saribiyik" }]
 # kendi libpq'suna baglanan kaynaktan derlenmis "psycopg" paketine
 # gecmek (guvenlik yamalarinin isletim sistemi seviyesinde yonetilmesini
 # saglar) bilincli olarak yeniden degerlendirilmelidir (bkz. Section 27).
+#
+# cryptography (M2.3), TDD Section 24'un "simetrik sifreleme" gereksinimini
+# karsilar - Fernet (AES128-CBC + HMAC, dogrulanmis simetrik sifreleme),
+# kendi kripto primitiflerimi yazmak yerine iyi-denetlenmis, endustri
+# standardi bir kutuphane kullanir. keyring (M2.3), sifreleme ANAHTARINI
+# (secret'larin kendisini degil) OS keychain'inde saklamak icin - TDD
+# Section 24'un "anahtar OS keychain'den... alinir" secenegi.
 dependencies = [
     "pydantic==2.13.4",
     "sqlalchemy==2.0.51",
     "alembic==1.19.0",
     "psycopg[binary]==3.3.4",
     "pyyaml==6.0.3",
+    "cryptography==46.0.7",
+    "keyring==25.7.0",
 ]
 
 # M1.4: `linkedinbot seed` komutunu (bkz. cli.py) dogrudan calistirilabilir
@@ -69,10 +78,14 @@ select = ["E", "F", "I", "UP", "B", "SIM", "N", "S"]
 # S101 (assert kullanimi), pytest'in kendi dogrulama mekanizmasidir --
 # test dosyalarinda bir guvenlik riski degildir (bandit'in genel amacli,
 # uretim kodu icin anlamli olan bir kuralinin test kodundaki bilinen
-# yanlis-pozitifidir). Yalnizca tests/ icin devre disi birakilir; src/
-# altindaki uygulama kodu icin S kurallari tam olarak gecerli kalir.
+# yanlis-pozitifidir). S105 (M2.3'te eklendi - "olasi sabit-kodlanmis
+# parola") ayni kategoridedir: SecretsProvider testleri kacinilmaz olarak
+# sahte/test secret degerleri icerir (orn. "sk-ant-test-value") - bunlar
+# GERCEK, sizdirilmis kimlik bilgileri degildir. Yalnizca tests/ icin
+# devre disi birakilir; src/ altindaki uygulama kodu icin S kurallari
+# tam olarak gecerli kalir.
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S105"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
