@@ -20,9 +20,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from linkedinbot.cli import seed
+from linkedinbot.config.loader import load_account_context
 from linkedinbot.db.models import AccountConfigProfileOrm, AccountOrm, UserProfileOrm
-from linkedinbot.db.repositories.user_profile_repository import SqlAlchemyUserProfileRepository
-from linkedinbot.domain.account_context import AccountContext
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_DIR = REPO_ROOT / "config"
@@ -99,13 +98,17 @@ def test_seed_ai_match_and_company_quality_weights_sum_to_one(db_session: Sessio
 
 def test_account_context_can_be_built_from_seeded_data(db_session: Session):
     # Roadmap M1.4'un tam olarak istedigi dogrulama: seed edilen hesap
-    # kimligiyle bir AccountContext kurulabilmelidir.
+    # kimligiyle bir AccountContext kurulabilmelidir. M2.2'den once bu test
+    # AccountContext'i yalnizca account_id+user_profile ile elle
+    # kuruyordu (o zamanki tek gecerli sekil buydu); M2.2, AccountContext'e
+    # zorunlu config_version/config_profile alanlarini eklediginden ve
+    # bunlari dogru sekilde doldurmanin GERCEK yolu artik
+    # `load_account_context()`'tir - bu test o gercek yolu kullanacak
+    # sekilde guncellendi (M1.4'un kendi verisi/davranisi degismedi).
     account = seed(CONFIG_DIR, db_session)
 
-    user_profile_repo = SqlAlchemyUserProfileRepository(db_session)
-    user_profile = user_profile_repo.get_by_account_id(account.account_id)
-
-    account_context = AccountContext(account_id=account.account_id, user_profile=user_profile)
+    account_context = load_account_context(account.account_id, db_session)
 
     assert account_context.account_id == account.account_id
-    assert account_context.user_profile.career_goals == user_profile.career_goals
+    assert account_context.config_version == 1
+    assert account_context.user_profile.career_goals.startswith("Build a career")

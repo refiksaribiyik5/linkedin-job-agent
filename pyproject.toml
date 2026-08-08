@@ -99,3 +99,16 @@ name = "Ports katmani somut db/adapters implementasyonlarini import edemez"
 type = "forbidden"
 source_modules = ["linkedinbot.ports"]
 forbidden_modules = ["linkedinbot.db", "linkedinbot.adapters"]
+
+# M2.2: AccountContext artik linkedinbot.config.schema'yi import ediyor (bkz.
+# domain/account_context.py modul dokumani - TDD Section 14'un AccountContext
+# tanimini yerine getirmek icin). config/schema.py'nin kendisi sifir altyapi
+# bagimliligi olan saf bir Pydantic modulu olsa da, bu kontrat, GELECEKTE
+# config/loader.py gibi DB'ye erisen bir config alt-modulunun yanlislikla
+# domain'e (dogrudan veya baska bir domain modulu uzerinden) sizmasina karsi
+# savunma derinligi saglar.
+[[tool.importlinter.contracts]]
+name = "Domain katmani db katmanini import edemez"
+type = "forbidden"
+source_modules = ["linkedinbot.domain"]
+forbidden_modules = ["linkedinbot.db"]
