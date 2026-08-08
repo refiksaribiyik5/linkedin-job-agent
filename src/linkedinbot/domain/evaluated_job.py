@@ -11,7 +11,7 @@ Status enum'u ve is_borderline alani icin: PRD 15.4 dort durum listeler
 Excluded de ENUM'a dahil edilmisti, ancak TDD Section 17 ("Durum Yonetimi")
 Borderline'in durum enum'unun bir kolu degil, ayri bir boolean bayrak
 (is_borderline) olmasi gerektigini acikca belirtir. Bu modul Section 17'nin
-bu daha ayrintili/gerekceli cozumunu esas alir: JobStatus be seviyeli
+bu daha ayrintili/gerekceli cozumunu esas alir: JobStatus bes seviyeli
 kalir (New/Seen/Updated/Closed/Excluded) ve is_borderline ayri bir alandir.
 """
 
@@ -39,7 +39,7 @@ class JobStatus(StrEnum):
 class FilterResult(BaseModel):
     """TDD Section 11: her filtre bir FilterResult doner (yalnizca boolean
     degil) - {passed, reason, confidence}. EvaluatedJob.filter_result_detail
-    alaninin dogrudan kaynagidir (acilanabilirlik, G-3).
+    alaninin dogrudan kaynagidir (aciklanabilirlik, G-3).
     """
 
     passed: bool

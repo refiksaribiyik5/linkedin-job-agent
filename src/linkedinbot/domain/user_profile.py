@@ -5,7 +5,7 @@ Bu bir Account-Scoped varliktir (PRD Section 15.0).
 Target Departments / Target Locations / Target Experience Levels, PRD
 15.1'in kendi "Not (versiyonlama)" metninde acikca belirtildigi ve TDD'nin
 duzeltilmis semasinda uygulandigi uzere, User Profile'da degil, Section
-17'deki digger parametrelerle ayni versiyonlanmis konfigurasyon profilinde
+17'deki diger parametrelerle ayni versiyonlanmis konfigurasyon profilinde
 (henuz M1.1'de tanimli olmayan AccountConfigProfile - bkz. M2.1) saklanir.
 Bu yuzden bu modulde yer almazlar.
 """
