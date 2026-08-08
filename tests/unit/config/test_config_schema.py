@@ -147,6 +147,28 @@ def test_ai_match_weight_out_of_unit_range_raises_validation_error(field, value)
         AIMatchWeights(**data["weights_ai_match"])
 
 
+def test_experience_level_outside_prd_section_11_3_catalog_is_rejected():
+    # Ic-denetimde bulunan eksik: Section 11.3, 17'nin tek degisiklik
+    # ornegi bir CIKARMA'dir ("'Junior' cikarilmasi") - hicbir yerde
+    # yeni bir deger EKLEME ornegi yoktur; bu, kumenin KAPALI oldugunu
+    # gosterir. "Senior Manager" gibi tanimsiz bir deger acikca
+    # reddedilmelidir (yazim hatasi/uydurma deger korumasi).
+    data = _valid_data()
+    data["target_criteria"]["experience_levels"] = ["Senior Manager"]
+    with pytest.raises(ValidationError):
+        TargetCriteria(**data["target_criteria"])
+
+
+def test_workplace_type_outside_domain_enum_is_rejected():
+    # PRD Section 15.2 zaten tam olarak {On-site, Hybrid, Remote} der;
+    # bu M1.1'in WorkplaceType enum'unda somutlasmis. "Remotee" gibi bir
+    # yazim hatasi acikca reddedilmelidir.
+    data = _valid_data()
+    data["target_criteria"]["workplace_types"] = ["Remotee"]
+    with pytest.raises(ValidationError):
+        TargetCriteria(**data["target_criteria"])
+
+
 def test_empty_locations_list_raises_validation_error():
     data = _valid_data()
     data["target_criteria"]["locations"] = []

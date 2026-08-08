@@ -136,6 +136,23 @@ def test_config_validation_error_aggregates_multiple_violations_not_just_the_fir
     assert len(exc_info.value.errors) >= 2
 
 
+def test_config_validation_error_aggregates_violations_across_different_sections():
+    # Onceki test ayni ic-ice modelin (thresholds) iki alanini bozuyordu -
+    # bu, Pydantic'in FARKLI iki ust-duzey bolumde (thresholds VE schedule)
+    # AYNI ANDA olusan ihlalleri de tek hatada topladigini ayrica kanitlar
+    # (ic-denetimde bulunup dogrudan Python'da tekrarlanabilirligi
+    # kanitlanmis bir davranis).
+    data = _valid_data()
+    data["thresholds"]["company_quality_score"] = 999
+    data["schedule"]["interval_days"] = -5
+
+    with pytest.raises(ConfigValidationError) as exc_info:
+        validate_config(data)
+
+    assert any("thresholds" in error for error in exc_info.value.errors)
+    assert any("schedule" in error for error in exc_info.value.errors)
+
+
 def test_config_with_unrecognized_field_is_rejected_with_clear_message():
     # FR-13: "yanlis yazilmis bir alan adi" - config/schema.py'nin
     # extra="forbid" korumasi validate_config() araciligiyla da gecerlidir.

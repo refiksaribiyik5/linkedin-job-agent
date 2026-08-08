@@ -48,13 +48,46 @@ schema unless the specification explicitly requires it"). Bu yuzden bu
 spesifik dogrulama KASITLI OLARAK UYGULANMAMISTIR - bkz.
 config/validator.py'deki TODO ve tests/unit/config/test_validator.py'deki
 acikca isaretlenmis (skip edilmis) test.
+
+Yukaridakinden AYRI, bagimsiz olarak gerekceli iki kapali-kume dogrulamasi
+(bir ic-denetimde eksik bulundu, bkz. commit dokumani): `workplace_types`
+ve `experience_levels`, "departman referansi" sorusunun bir yeniden
+yorumu DEGILDIR - ikisi de kendi baslarina, PRD'nin zaten net bir sekilde
+KAPALI kume olarak tanimladigi alanlardir ve M1.4'un verisini hic
+degistirmeden dogrulanabilirler:
+- `workplace_types`: PRD Section 15.2 zaten tam olarak {On-site, Hybrid,
+  Remote} der; bu M1.1'in `domain.job_posting.WorkplaceType` enum'unda
+  zaten somutlasmis - burada yeniden tanimlamak yerine DOGRUDAN ICE
+  AKTARILIR (db/models.py'nin ORM ENUM sutunlari icin ayni enum'u
+  yeniden kullanmasiyla ayni, zaten onaylanmis desen).
+- `experience_levels`: PRD Section 11.3 acik bir 8 degerlik liste verir;
+  Section 17'nin bu alan icin verdigi TEK degisiklik ornegi CIKARMA
+  ("'Junior' cikarilmasi") - hicbir yerde EKLEME ornegi yoktur
+  (departments'in "yeni kume eklenmesi" ornegiyle tam ters) - bu, kumenin
+  KAPALI oldugunu acikca gosterir.
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from linkedinbot.domain.job_posting import WorkplaceType
+
+# PRD Section 11.3: kabul edilen deneyim seviyeleri (kapali kume - Section
+# 17'nin tek degisiklik ornegi bir CIKARMA'dir, hicbir yerde yeni bir
+# deger EKLENMESİ ornegi yoktur).
+ExperienceLevel = Literal[
+    "Internship",
+    "New Graduate",
+    "Entry Level",
+    "Graduate Program",
+    "Management Trainee",
+    "MT Program",
+    "0-2 Years Experience",
+    "Junior",
+]
 
 # `Field(min_length=1)` dogrudan bir list/dict alanina uygulandiginda yalnizca
 # DIS kabin boyutunu kisitlar (orn. "en az 1 anahtar") - IC elemanlarin
@@ -74,8 +107,8 @@ class TargetCriteria(BaseModel):
 
     locations: NonEmptyStrList
     departments: Annotated[dict[NonEmptyStr, NonEmptyStrList], Field(min_length=1)]
-    experience_levels: NonEmptyStrList
-    workplace_types: NonEmptyStrList
+    experience_levels: Annotated[list[ExperienceLevel], Field(min_length=1)]
+    workplace_types: Annotated[list[WorkplaceType], Field(min_length=1)]
 
 
 class AIMatchWeights(BaseModel):
