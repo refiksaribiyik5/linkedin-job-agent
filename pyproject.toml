@@ -10,11 +10,16 @@ requires-python = ">=3.12"
 authors = [{ name = "Refik Saribiyik" }]
 
 # TDD Section 2'de secilen bagimliliklar, onlari fiilen kullanan ilk milestone'da
-# eklenir. Pydantic v2, M1.1'in domain modelleri icin eklenmistir. Playwright,
-# SQLAlchemy, Anthropic SDK ve APScheduler ise sirasiyla M3.1, M1.2, M5.1, M9.5'te
-# eklenecektir. TDD Section 26 geregi kilitli (pinned) surum kullanilir.
+# eklenir. Pydantic v2 (M1.1) ve SQLAlchemy 2.x + Alembic + psycopg (M1.2, TDD
+# Section 2 "ORM / Migration") eklenmistir. Playwright ve Anthropic SDK ve
+# APScheduler ise sirasiyla M3.1, M5.1, M9.5'te eklenecektir. TDD Section 26
+# geregi kilitli (pinned) surum kullanilir. psycopg (psycopg3), SQLAlchemy 2.x
+# ile onerilen modern PostgreSQL suruculugudur.
 dependencies = [
     "pydantic==2.13.4",
+    "sqlalchemy==2.0.51",
+    "alembic==1.19.0",
+    "psycopg[binary]==3.3.4",
 ]
 
 # TDD Section 26 ("Baglilik hijyeni") geregi kilitli (pinned) surumler kullanilir.
@@ -34,6 +39,10 @@ where = ["src"]
 target-version = "py312"
 line-length = 100
 src = ["src"]
+# migrations/, Alembic'in kendi sablonuyla (alembic init / --autogenerate)
+# uretilir; Alembic'in kendi konvansiyonlarindan elle saptirmamak icin lint
+# kapsami disinda tutulur (standart pratik).
+extend-exclude = ["migrations"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "N"]
