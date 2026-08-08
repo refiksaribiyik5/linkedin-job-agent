@@ -162,3 +162,79 @@ def test_ensure_session_leaves_no_partial_state_when_login_fails(
 
     assert db_session.get(LinkedInSessionOrm, account.account_id) is None
     assert secrets_provider._store == {}
+
+
+def test_ensure_session_does_not_write_secret_if_db_write_fails(
+    db_session: Session,
+    account: AccountOrm,
+    secrets_provider: _FakeSecretsProvider,
+    playwright_login,
+    monkeypatch,
+):
+    # Bagimsiz incelemede bulunan Major bulgu: DB yazimi (flush) ile
+    # Secrets Provider yazimi birbirinden bagimsiz iki kalicilik
+    # mekanizmasidir - hicbir ortak transaction'lari yoktur. Eger secret
+    # ONCE yazilirsa ve DB flush'i SONRA basarisiz olursa, kullanicinin
+    # tamamladigi pahali bir interaktif giris (2FA/CAPTCHA dahil) bosa
+    # gitmis olur: disk uzerinde hicbir DB satirinin referans vermedigi,
+    # "yetim" bir secret kalir. Duzeltme: DB yazimi (flush) SIRAYLA ONCE
+    # yapilir; yalnizca basarili olursa secret yazilir - boylece DB
+    # basarisizligi secret yazimindan ONCE gerceklesir, hicbir yetim
+    # secret asla olusmaz.
+    manager = SessionManager(db_session, secrets_provider, playwright_login)
+
+    # NOT: `session.get(...)` kendi ici SQLAlchemy autoflush'i tetikler -
+    # bu, bekleyen HICBIR degisiklik olmadiginda bile `flush()`'i cagirir
+    # (zararsiz bir no-op olarak). Kosulsuz bir "her zaman patla" sahte
+    # flush, bu zararsiz autoflush cagrisini da yakalayip testi YANLIS
+    # noktada (henuz playwright_login/secrets.set'e hic ulasmadan)
+    # patlatirdi - bu yuzden yalnizca GERCEKTEN bekleyen (yeni/degismis)
+    # nesne varken basarisiz olan bir sarmalayici kullanilir.
+    original_flush = db_session.flush
+
+    def _failing_flush(*args, **kwargs):
+        if db_session.new or db_session.dirty:
+            raise RuntimeError("simulated db failure")
+        return original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(db_session, "flush", _failing_flush)
+
+    with pytest.raises(RuntimeError, match="simulated db failure"):
+        manager.ensure_session(account.account_id)
+
+    assert secrets_provider._store == {}
+
+
+def test_ensure_session_db_row_is_cleanly_rollback_recoverable_if_secret_write_fails(
+    db_session: Session,
+    account: AccountOrm,
+    playwright_login,
+):
+    # Ayni bulgunun diger yarisi: DB yazimi ONCE gerceklestigi icin,
+    # SONRASINDA secret yazimi basarisiz olursa (orn. disk dolu), cagiran
+    # (established `cli.seed()`/`_run_seed_command` konvansiyonuyla
+    # tutarli sekilde) transaction'i geri alabilir (rollback) ve hicbir
+    # tutarsiz/yarim durum kalmaz - ne "DB'de var ama secret'i yok" bir
+    # satir, ne de bir yetim secret.
+    # `account.account_id` rollback ONCESINDE yakalanir: `db_session.rollback()`
+    # bu session'daki TUM nesneleri (henuz commit edilmemis `account` dahil)
+    # expire eder; rollback SONRASI `account.account_id`'ye tekrar erismeye
+    # calismak, artik var olmayan satiri yeniden yuklemeye calisip
+    # `ObjectDeletedError` firlatirdi.
+    account_id = account.account_id
+
+    class _FailingSecretsProvider(SecretsProviderPort):
+        def get(self, key: str) -> str | None:
+            return None
+
+        def set(self, key: str, value: str) -> None:
+            raise RuntimeError("disk full")
+
+    manager = SessionManager(db_session, _FailingSecretsProvider(), playwright_login)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        manager.ensure_session(account_id)
+
+    db_session.rollback()
+
+    assert db_session.get(LinkedInSessionOrm, account_id) is None

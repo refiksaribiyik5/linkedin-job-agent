@@ -61,9 +61,22 @@ class SessionManager(LinkedInPort):
 
         storage_state = self._playwright_login()
         secret_key = f"linkedin_storage_state:{account_id}"
-        self._secrets_provider.set(secret_key, json.dumps(storage_state))
         now = datetime.now(UTC)
 
+        # SIRALAMA KASITLIDIR (bagimsiz incelemede bulunan Major bulgunun
+        # duzeltmesi): DB yazimi (flush) Secrets Provider yazimindan ONCE
+        # yapilir. Bu iki kalicilik mekanizmasi (SQL transaction'i ve
+        # Secrets Provider'in kendi dosyasi) ortak bir transaction
+        # PAYLASMAZ - biri digerini geri alamaz. Eger secret ONCE
+        # yazilsaydi ve DB flush'i SONRA basarisiz olsaydı, kullanicinin
+        # tamamladigi pahali bir interaktif giris (2FA/CAPTCHA dahil)
+        # bosa gitmis olurdu: hicbir DB satirinin referans vermedigi
+        # "yetim" bir secret diskte kalirdi. Bu sirayla, DB basarisizligi
+        # secret yazimindan ONCE gerceklesir (hicbir yetim secret asla
+        # olusmaz); DB basarili ama secret yazimi SONRADAN basarisiz
+        # olursa da, cagiran (established `cli.seed()`/`_run_seed_command`
+        # rollback konvansiyonuyla tutarli sekilde) transaction'i temiz
+        # bicimde geri alabilir - hicbir tutarsiz ara durum kalmaz.
         if existing is not None:
             existing.encrypted_storage_state_ref = secret_key
             existing.session_status = SessionStatus.VALID
@@ -78,3 +91,5 @@ class SessionManager(LinkedInPort):
                 )
             )
         self._session.flush()
+
+        self._secrets_provider.set(secret_key, json.dumps(storage_state))
