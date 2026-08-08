@@ -3,12 +3,16 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import yaml
 
 from linkedinbot import cli
-from linkedinbot.cli import _deep_merge
+from linkedinbot.cli import _deep_merge, validate_config_files
+from linkedinbot.config.validator import ConfigValidationError
 from linkedinbot.domain.account import Account
 
 NOW = datetime(2026, 8, 8, tzinfo=UTC)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_DIR = REPO_ROOT / "config"
 
 
 def test_deep_merge_overrides_leaf_value():
@@ -151,3 +155,183 @@ def test_main_seed_command_defaults_config_dir_to_config(monkeypatch):
     cli.main(["seed"])
 
     assert calls == [Path("config")]
+
+
+# ---------------------------------------------------------------------------
+# `config validate` (Roadmap M2.4) - `validate_config_files()` gercek repo
+# config dosyalarina karsi (test_seed.py'nin ayni REPO_ROOT/config desenini
+# kullanarak), ve bilinen-kotu config dosyalari ureten gecici dizinlere
+# karsi test edilir. DB'ye hicbir sekilde dokunulmaz (kullanicinin acikca
+# onayladigi kapsam: yalnizca config DOSYALARI, DB'deki aktif config degil).
+# ---------------------------------------------------------------------------
+
+
+def _write_config_files(config_dir: Path, system_defaults: dict, account_overrides: dict) -> None:
+    (config_dir / "accounts").mkdir(parents=True, exist_ok=True)
+    (config_dir / "system.defaults.yaml").write_text(yaml.safe_dump(system_defaults))
+    account_seed = {
+        "display_name": "Test",
+        "career_goals": "goals",
+        "skills_summary": "skills",
+        "account_config_overrides": account_overrides,
+    }
+    (config_dir / "accounts" / "default.account.yaml").write_text(yaml.safe_dump(account_seed))
+
+
+def _minimal_valid_system_defaults() -> dict:
+    return {
+        "target_criteria": {
+            "locations": ["Istanbul"],
+            "departments": {"Sales & Business Development": ["Sales Executive"]},
+            "experience_levels": ["Entry Level"],
+            "workplace_types": ["On-site"],
+        },
+        "weights_ai_match": {
+            "department_role_relevance": 0.35,
+            "experience_level_fit": 0.15,
+            "location_fit": 0.10,
+            "company_quality_contribution": 0.25,
+            "career_goal_alignment": 0.15,
+        },
+        "weights_company_quality": {
+            "brand_reputation_prestige": 0.25,
+            "company_scale": 0.20,
+            "career_development_training_culture": 0.20,
+            "sector_position": 0.15,
+            "corporate_stability": 0.10,
+            "external_signals": 0.10,
+        },
+        "thresholds": {
+            "company_quality_score": 50,
+            "ai_match_score": 60,
+            "department_confidence": 0.65,
+            "borderline_band_width": 5,
+            "company_score_reevaluation_window_days": 30,
+        },
+        "schedule": {"interval_days": 2, "jitter_minutes": 30},
+        "collection_limits": {"max_jobs_per_run": 200},
+        "notification_settings": {"enabled": False, "channels": []},
+        "report_format_settings": {
+            "format": "Markdown",
+            "template": "default",
+            "top_matches_count": 10,
+            "language": "en",
+        },
+        "prompt_template_refs": {
+            "department_matching": "department_matching.prompt.md",
+            "experience_inference": "experience_inference.prompt.md",
+            "company_scoring": "company_scoring.prompt.md",
+            "ai_match_rationale": "ai_match_rationale.prompt.md",
+        },
+    }
+
+
+def test_validate_config_files_accepts_real_repo_config():
+    # M1.4'un zaten onaylanmis, gercekten seed edilen dosyalari - "bilinen
+    # iyi config dosyalari" (Roadmap M2.4 Tamamlanma Dogrulamasi) tam
+    # olarak budur.
+    profile = validate_config_files(CONFIG_DIR)
+
+    assert profile.target_criteria.locations == ["Istanbul"]
+    assert profile.report_format_settings.language == "en"
+
+
+def test_validate_config_files_accepts_known_good_config(tmp_path: Path):
+    _write_config_files(tmp_path, _minimal_valid_system_defaults(), {})
+
+    profile = validate_config_files(tmp_path)
+
+    assert profile.thresholds.ai_match_score == 60
+
+
+def test_validate_config_files_rejects_known_bad_weight_sum(tmp_path: Path):
+    bad_defaults = _minimal_valid_system_defaults()
+    bad_defaults["weights_ai_match"]["department_role_relevance"] = 0.99  # toplam artik 1.0 degil
+    _write_config_files(tmp_path, bad_defaults, {})
+
+    with pytest.raises(ConfigValidationError, match="AI Match Score"):
+        validate_config_files(tmp_path)
+
+
+def test_validate_config_files_rejects_missing_required_field(tmp_path: Path):
+    bad_defaults = _minimal_valid_system_defaults()
+    del bad_defaults["target_criteria"]["workplace_types"]
+    _write_config_files(tmp_path, bad_defaults, {})
+
+    with pytest.raises(ConfigValidationError, match="workplace_types"):
+        validate_config_files(tmp_path)
+
+
+def test_validate_config_files_propagates_missing_file(tmp_path: Path):
+    with pytest.raises(FileNotFoundError):
+        validate_config_files(tmp_path)
+
+
+def test_run_config_validate_command_returns_zero_and_prints_success_on_valid_config(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(cli, "validate_config_files", lambda config_dir: object())
+
+    exit_code = cli._run_config_validate_command(Path("some-dir"))
+
+    assert exit_code == 0
+    assert "some-dir" in capsys.readouterr().out
+
+
+def test_run_config_validate_command_returns_one_and_prints_errors_on_invalid_config(
+    monkeypatch, capsys
+):
+    def _raise(config_dir):
+        raise ConfigValidationError(["thresholds.ai_match_score: bir sey yanlis"])
+
+    monkeypatch.setattr(cli, "validate_config_files", _raise)
+
+    exit_code = cli._run_config_validate_command(Path("some-dir"))
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "thresholds.ai_match_score" in err
+
+
+def test_run_config_validate_command_returns_one_and_prints_message_on_missing_file(
+    monkeypatch, capsys
+):
+    def _raise(config_dir):
+        raise FileNotFoundError("no such file: system.defaults.yaml")
+
+    monkeypatch.setattr(cli, "validate_config_files", _raise)
+
+    exit_code = cli._run_config_validate_command(Path("some-dir"))
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "system.defaults.yaml" in err
+
+
+def test_main_config_validate_dispatches_with_config_dir(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli, "_run_config_validate_command", lambda config_dir: calls.append(config_dir) or 0
+    )
+
+    exit_code = cli.main(["config", "validate", "--config-dir", "/opt/custom-config"])
+
+    assert exit_code == 0
+    assert calls == [Path("/opt/custom-config")]
+
+
+def test_main_config_validate_defaults_config_dir_to_config(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli, "_run_config_validate_command", lambda config_dir: calls.append(config_dir) or 0
+    )
+
+    cli.main(["config", "validate"])
+
+    assert calls == [Path("config")]
+
+
+def test_main_config_validate_propagates_nonzero_exit_code(monkeypatch):
+    monkeypatch.setattr(cli, "_run_config_validate_command", lambda config_dir: 1)
+
+    assert cli.main(["config", "validate"]) == 1

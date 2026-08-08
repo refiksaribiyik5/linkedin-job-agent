@@ -1,18 +1,29 @@
 """LinkedInBot CLI (TDD Section 5) - manuel komutlar.
 
-M1.4: yalnizca `seed` komutu eklenir - V1'in tek hesabini, kullanici
-profilini ve ilk (config_version=1, is_active=true) config profilini
+M1.4: `seed` komutu eklenir - V1'in tek hesabini, kullanici profilini ve
+ilk (config_version=1, is_active=true) config profilini
 `config/system.defaults.yaml` + `config/accounts/default.account.yaml`
-dosyalarindan olusturur (Roadmap M1.4). `config validate` (M2.4) ve `run`
-(M9.6) komutlari sonraki milestone'larda bu dosyaya eklenecektir - bu
-yuzden `cli.py`, ayri bir `scripts/seed.py` yerine burada baslatilir
-(TDD Section 5'in dosya agacinda zaten `cli.py` ayrilmistir, `scripts/`
-diye bir dizin hic yoktur).
+dosyalarindan olusturur (Roadmap M1.4). `run` (M9.6) komutu sonraki bir
+milestone'da bu dosyaya eklenecektir - bu yuzden `cli.py`, ayri bir
+`scripts/seed.py` yerine burada baslatilir (TDD Section 5'in dosya
+agacinda zaten `cli.py` ayrilmistir, `scripts/` diye bir dizin hic
+yoktur).
+
+M2.4: `config validate` komutu eklenir - `--config-dir` ile verilen bir
+dizindeki AYNI iki YAML dosyasini (`seed`'in okudugu dosyalarla birebir
+ayni ikili) okuyup M2.1'in `validate_config()`'una (sema + agirlik-toplami
+is kurallari) verir ve sonucu bir çıkış koduyla (0=gecerli, 1=gecersiz)
+raporlar. Roadmap M2.4'un "Tamamlanma Dogrulamasi" satiri acikca "bilinen
+iyi ve kotu config DOSYALARIYLA manuel calistirma" der - bu KASITLI olarak
+M2.2'nin `load_account_context()`'ini (DB'deki AKTIF config'i dogrulayan,
+ayri bir kavram) KULLANMAZ; kullanici bu iki yorumu (dosya-tabanli vs.
+DB-tabanli) acikca degerlendirip dosya-tabanli yorumu onaylamistir.
 
 Bu modul, M2.1/M2.2'nin tam config sema/dogrulama/oncelik-zinciri
 mantigini ONCEDEN UYGULAMAZ - yalnizca iki YAML dosyasini okuyup birlestirip
-DB'ye bir kere yazan minimal bir bootstrap islemidir (bkz. `_deep_merge`
-ve `seed` fonksiyonlarinin dokumanlari).
+DB'ye bir kere yazan (`seed`) veya sadece dogrulayan (`config validate`)
+minimal islemlerdir (bkz. `_deep_merge`, `seed`, `validate_config_files`
+fonksiyonlarinin dokumanlari).
 """
 
 from __future__ import annotations
@@ -26,6 +37,8 @@ from typing import Any
 import yaml
 from sqlalchemy.orm import Session
 
+from linkedinbot.config.schema import AccountConfigProfile
+from linkedinbot.config.validator import ConfigValidationError, validate_config
 from linkedinbot.db.engine import create_db_engine, create_session_factory
 from linkedinbot.db.models import AccountConfigProfileOrm
 from linkedinbot.db.repositories.account_repository import SqlAlchemyAccountRepository
@@ -55,6 +68,74 @@ def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, An
     return merged
 
 
+def _read_config_files(config_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """`system.defaults.yaml` + `accounts/default.account.yaml` dosyalarini
+    okur. `seed()` ve `validate_config_files()` tarafindan ortaklasa
+    kullanilir - ikisi de TAM OLARAK ayni iki dosyaya ihtiyac duyar (seed
+    account_seed'in TUMUNU - display_name/career_goals dahil - kullanirken,
+    validate_config_files yalnizca `account_config_overrides`'i kullanir).
+
+    Dosyalardan biri eksikse `FileNotFoundError` (yol adini iceren, Python'in
+    kendi varsayilan mesaji) dogrudan yukari sizar - hem `seed` hem
+    `config validate` icin bu, acik/anlasilir bir "dosya bulunamadi"
+    basarisizligidir, ozel bir sarmalamaya ihtiyac yoktur.
+    """
+    system_defaults = yaml.safe_load((config_dir / "system.defaults.yaml").read_text())
+    account_seed = yaml.safe_load((config_dir / "accounts" / "default.account.yaml").read_text())
+    return system_defaults, account_seed
+
+
+def _load_config_profile_data(config_dir: Path) -> dict[str, Any]:
+    """`_read_config_files()`'in okudugu ikiliyi, `account_config_overrides`'i
+    sistem varsayilanlarinin uzerine deep-merge ederek TEK bir
+    account_config_profiles-sekilli dict'e indirger (bkz. `seed()` ve
+    `validate_config_files()`'in ikisinin de ihtiyac duydugu ortak sekil).
+    """
+    system_defaults, account_seed = _read_config_files(config_dir)
+    overrides = account_seed.get("account_config_overrides", {})
+    return _deep_merge(system_defaults, overrides)
+
+
+def validate_config_files(config_dir: Path) -> AccountConfigProfile:
+    """Roadmap M2.4: `config_dir` altindaki config dosyalarini (`seed()`'in
+    okudugu AYNI iki dosya, ayni deep-merge mantigiyla) M2.1'in
+    `validate_config()`'una (sema + agirlik-toplami is kurallari) verir.
+
+    DB'ye hicbir sekilde dokunmaz - `seed`'in aksine burada bir `Session`
+    parametresi YOKTUR, cunku dogrulanacak sey DB'ye henuz YAZILMAMIS bir
+    ADAY dosya cifti (bkz. modul dokumaninin M2.4 notu).
+
+    Basarisiz olursa `ConfigValidationError` (sema/is-kurali ihlalleri) veya
+    `FileNotFoundError` (eksik dosya) firlatir - cagiran (`_run_config_validate_command`)
+    bu ikisini yakalayip kullaniciya uygun bir cikis koduyla raporlar.
+    """
+    config_profile_data = _load_config_profile_data(config_dir)
+    return validate_config(config_profile_data)
+
+
+def _run_config_validate_command(config_dir: Path) -> int:
+    """`linkedinbot config validate`'in gercek CLI cagrisi: `validate_config_files()`'i
+    calistirir, basarili/basarisiz durumlari acik bir mesaj + dogru cikis
+    koduyla (0=gecerli, 1=gecersiz) raporlar (Roadmap M2.4 "Beklenen Sonuc").
+
+    Hata mesajlari stderr'e, basari mesaji stdout'a yazilir (standart CLI
+    konvansiyonu - hatalar `2>/dev/null` ile ayri filtrelenebilsin diye).
+    """
+    try:
+        validate_config_files(config_dir)
+    except FileNotFoundError as exc:
+        print(f"Config dosyasi bulunamadi: {exc}", file=sys.stderr)
+        return 1
+    except ConfigValidationError as exc:
+        print(f"Config gecersiz ({config_dir}):", file=sys.stderr)
+        for error in exc.errors:
+            print(f"  - {error}", file=sys.stderr)
+        return 1
+
+    print(f"Config gecerli: {config_dir}")
+    return 0
+
+
 def seed(config_dir: Path, session: Session) -> Account:
     """Roadmap M1.4 "Beklenen Sonuç": bos bir veritabanina karsi calistirildiginda
     bir `accounts` satiri, bir `user_profiles` satiri ve
@@ -73,9 +154,7 @@ def seed(config_dir: Path, session: Session) -> Account:
     kasitli bir sinirlamadir, V1'in tek seferlik bootstrap akisinin
     (bkz. M10.2) otesinde henuz bir gereksinim degildir.
     """
-    system_defaults = yaml.safe_load((config_dir / "system.defaults.yaml").read_text())
-    account_seed = yaml.safe_load((config_dir / "accounts" / "default.account.yaml").read_text())
-
+    system_defaults, account_seed = _read_config_files(config_dir)
     overrides = account_seed.get("account_config_overrides", {})
     config_profile_data = _deep_merge(system_defaults, overrides)
 
@@ -165,10 +244,30 @@ def main(argv: list[str] | None = None) -> int:
         help="system.defaults.yaml ve accounts/ alt dizinini iceren dizin (varsayilan: ./config).",
     )
 
+    config_parser = subparsers.add_parser("config", help="Config ile ilgili komutlar.")
+    config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
+    validate_parser = config_subparsers.add_parser(
+        "validate",
+        help=(
+            "Bir config dosya ciftini (system.defaults.yaml + "
+            "accounts/default.account.yaml) semaya ve is kurallarina karsi "
+            "dogrular (Roadmap M2.4)."
+        ),
+    )
+    validate_parser.add_argument(
+        "--config-dir",
+        type=Path,
+        default=Path("config"),
+        help="system.defaults.yaml ve accounts/ alt dizinini iceren dizin (varsayilan: ./config).",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "seed":
         _run_seed_command(args.config_dir)
+        return 0
+    if args.command == "config" and args.config_command == "validate":
+        return _run_config_validate_command(args.config_dir)
 
     return 0
 
