@@ -267,6 +267,34 @@ def test_validate_config_files_propagates_missing_file(tmp_path: Path):
         validate_config_files(tmp_path)
 
 
+def test_validate_config_files_raises_yaml_error_for_malformed_syntax(tmp_path: Path):
+    # Ic-denetimde bulunan bulgu: bir kullanicinin "bilinen kotu config
+    # dosyasi" (Roadmap M2.4) olarak deneyecegi en dogal senaryo -
+    # sozdizimsel olarak bozuk YAML - ham bir traceback'e neden oluyordu.
+    (tmp_path / "accounts").mkdir(parents=True)
+    (tmp_path / "system.defaults.yaml").write_text("not: valid: yaml: [unclosed")
+    (tmp_path / "accounts" / "default.account.yaml").write_text(
+        yaml.safe_dump({"display_name": "x", "career_goals": "x", "skills_summary": "x"})
+    )
+
+    with pytest.raises(yaml.YAMLError):
+        validate_config_files(tmp_path)
+
+
+def test_validate_config_files_raises_value_error_for_empty_file(tmp_path: Path):
+    # Ayni bulgu, sozdizimsel olarak GECERLI ama bos/mapping-olmayan bir
+    # YAML dosyasi icin (yaml.safe_load bos bir dosyadan None doner) -
+    # _deep_merge icinde ham bir TypeError'a neden oluyordu.
+    (tmp_path / "accounts").mkdir(parents=True)
+    (tmp_path / "system.defaults.yaml").write_text("")
+    (tmp_path / "accounts" / "default.account.yaml").write_text(
+        yaml.safe_dump({"display_name": "x", "career_goals": "x", "skills_summary": "x"})
+    )
+
+    with pytest.raises(ValueError, match="system.defaults.yaml"):
+        validate_config_files(tmp_path)
+
+
 def test_run_config_validate_command_returns_zero_and_prints_success_on_valid_config(
     monkeypatch, capsys
 ):
@@ -306,6 +334,54 @@ def test_run_config_validate_command_returns_one_and_prints_message_on_missing_f
     err = capsys.readouterr().err
     assert exit_code == 1
     assert "system.defaults.yaml" in err
+
+
+def test_run_config_validate_command_returns_one_and_prints_message_on_malformed_yaml(
+    monkeypatch, capsys
+):
+    def _raise(config_dir):
+        raise yaml.YAMLError("mapping values are not allowed here")
+
+    monkeypatch.setattr(cli, "validate_config_files", _raise)
+
+    exit_code = cli._run_config_validate_command(Path("some-dir"))
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "mapping values are not allowed here" in err
+
+
+def test_run_config_validate_command_returns_one_and_prints_message_on_non_mapping_yaml(
+    monkeypatch, capsys
+):
+    def _raise(config_dir):
+        raise ValueError("system.defaults.yaml: gecerli bir YAML sozlugu icermiyor.")
+
+    monkeypatch.setattr(cli, "validate_config_files", _raise)
+
+    exit_code = cli._run_config_validate_command(Path("some-dir"))
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "system.defaults.yaml" in err
+
+
+def test_run_config_validate_command_config_validation_error_not_swallowed_by_value_error(
+    monkeypatch, capsys
+):
+    # ConfigValidationError, ValueError'un bir alt sinifidir - except
+    # sirasi yanlis olursa (genel ValueError once yakalanirsa) `.errors`
+    # listesindeki tek tek maddeler yerine genel ValueError mesaji basilir.
+    def _raise(config_dir):
+        raise ConfigValidationError(["thresholds.ai_match_score: bir sey yanlis"])
+
+    monkeypatch.setattr(cli, "validate_config_files", _raise)
+
+    exit_code = cli._run_config_validate_command(Path("some-dir"))
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "  - thresholds.ai_match_score: bir sey yanlis" in err
 
 
 def test_main_config_validate_dispatches_with_config_dir(monkeypatch):

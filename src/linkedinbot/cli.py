@@ -79,9 +79,25 @@ def _read_config_files(config_dir: Path) -> tuple[dict[str, Any], dict[str, Any]
     kendi varsayilan mesaji) dogrudan yukari sizar - hem `seed` hem
     `config validate` icin bu, acik/anlasilir bir "dosya bulunamadi"
     basarisizligidir, ozel bir sarmalamaya ihtiyac yoktur.
+
+    Ic-denetimde bulunan bulgu: sozdizimsel olarak bozuk YAML zaten acik
+    bir `yaml.YAMLError` firlatiyordu (degisiklik gerekmedi), ama
+    sozdizimsel olarak GECERLI ama bos veya mapping-olmayan bir dosya
+    (`yaml.safe_load` boyle bir girdi icin `None` veya bir liste/skaler
+    doner) asagi akiste (`_deep_merge`) baglamsiz bir `TypeError`'a
+    neden oluyordu - `config validate`'in (M2.4) TAM OLARAK onlemesi
+    gereken, kullanicinin "bilinen kotu config dosyasi" olarak deneyecegi
+    en dogal senaryolardan biri. Burada acikca kontrol edilip, hangi
+    dosyanin sorunlu oldugunu adiyla belirten bir `ValueError` firlatilir.
     """
-    system_defaults = yaml.safe_load((config_dir / "system.defaults.yaml").read_text())
-    account_seed = yaml.safe_load((config_dir / "accounts" / "default.account.yaml").read_text())
+    system_defaults_path = config_dir / "system.defaults.yaml"
+    account_seed_path = config_dir / "accounts" / "default.account.yaml"
+    system_defaults = yaml.safe_load(system_defaults_path.read_text())
+    account_seed = yaml.safe_load(account_seed_path.read_text())
+    if not isinstance(system_defaults, dict):
+        raise ValueError(f"{system_defaults_path}: gecerli bir YAML sozlugu (mapping) icermiyor.")
+    if not isinstance(account_seed, dict):
+        raise ValueError(f"{account_seed_path}: gecerli bir YAML sozlugu (mapping) icermiyor.")
     return system_defaults, account_seed
 
 
@@ -120,16 +136,29 @@ def _run_config_validate_command(config_dir: Path) -> int:
 
     Hata mesajlari stderr'e, basari mesaji stdout'a yazilir (standart CLI
     konvansiyonu - hatalar `2>/dev/null` ile ayri filtrelenebilsin diye).
+
+    NOT: `ConfigValidationError`, `ValueError`'un bir alt sinifidir (bkz.
+    config/validator.py) - bu yuzden `except ConfigValidationError` genel
+    `except ValueError`'dan ONCE gelir; aksi halde Python'in ilk-eslesen-
+    yakalar kurali geregi genel dal onu yakalar ve `.errors` listesindeki
+    tek tek maddeler yerine tek bir genel mesaj basilirdi (bkz.
+    test_run_config_validate_command_config_validation_error_not_swallowed_by_value_error).
     """
     try:
         validate_config_files(config_dir)
     except FileNotFoundError as exc:
         print(f"Config dosyasi bulunamadi: {exc}", file=sys.stderr)
         return 1
+    except yaml.YAMLError as exc:
+        print(f"Config dosyasi gecersiz YAML iceriyor: {exc}", file=sys.stderr)
+        return 1
     except ConfigValidationError as exc:
         print(f"Config gecersiz ({config_dir}):", file=sys.stderr)
         for error in exc.errors:
             print(f"  - {error}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"Config dosyasi gecersiz: {exc}", file=sys.stderr)
         return 1
 
     print(f"Config gecerli: {config_dir}")
