@@ -44,3 +44,13 @@ def test_user_profile_has_no_target_criteria_fields():
     assert "target_departments" not in field_names
     assert "target_locations" not in field_names
     assert "target_experience_levels" not in field_names
+
+
+def test_preferences_rejects_unrecognized_fields():
+    # M1.4 review duzeltmesi: Preferences yalnizca blacklist alanlarini
+    # tasir (bkz. modul dokumani); baska bir alan (orn. cli.py:seed()'in
+    # account_config_overrides'a yazmasi gereken "remote_work"/"language"
+    # yanlislikla buraya konursa) sessizce yutulmak yerine acikca
+    # reddedilmelidir - aksi halde seed edilen veri sessizce eksik kalir.
+    with pytest.raises(ValidationError):
+        Preferences(excluded_companies=[], excluded_job_ids=[], remote_work="hybrid")

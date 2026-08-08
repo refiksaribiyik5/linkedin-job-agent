@@ -118,6 +118,11 @@ def seed(config_dir: Path, session: Session) -> Account:
         report_format_settings=config_profile_data["report_format_settings"],
         prompt_template_refs=config_profile_data["prompt_template_refs"],
         is_active=True,
+        # NOT: `validated_at`, bu satirin YAZILDIGI zamani tasir - FR-13'un
+        # gercek sema/agirlik-toplami dogrulamasi (M2.1) burada henuz
+        # CALISMAZ. Bu alanin "gercekten dogrulandi" degil "bu haliyle
+        # kaydedildi" anlamina geldigi acikca not edilir; M2.1 kendi
+        # dogrulamasini calistirdiginda bu alani gunceller.
         validated_at=now,
     )
     session.add(config_profile)
