@@ -5,6 +5,12 @@ stratejisi geregi bir run_logs satiri yalnizca bir calistirma
 sonlandiktan SONRA, tek bir atomik transaction icinde yazilir - var olan
 bir kayit daha sonra degistirilmez (kalici bir tarihsel kayittir, NFR-11
 "asla silme" ilkesinin dogal bir uzantisidir).
+
+`get_by_id` icin `account_id` zorunlulugu (M1.3 review duzeltmesi):
+`run_logs` de `reports` gibi TDD Section 14'un Account-Scoped listesindedir;
+ayni gerekce (bkz. report_repository_port.py modul dokumani) burada da
+gecerlidir - ilk implementasyon account_id olmadan sorguluyordu, bu
+duzeltildi.
 """
 
 from __future__ import annotations
@@ -27,5 +33,5 @@ class RunLogRepositoryPort(ABC):
         """
 
     @abstractmethod
-    def get_by_id(self, run_id: UUID) -> RunLog | None:
-        """Kayit bulunamazsa None doner."""
+    def get_by_id(self, account_id: UUID, run_id: UUID) -> RunLog | None:
+        """Kayit bulunamazsa VEYA baska bir hesaba aitse None doner."""

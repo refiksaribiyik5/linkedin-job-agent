@@ -128,6 +128,75 @@ def test_update_transitions_status_new_to_seen(
     assert fetched.status == JobStatus.SEEN
 
 
+def test_create_return_value_reflects_db_side_numeric_rounding(
+    db_session: Session, account: AccountOrm, job: JobPostingOrm, make_config_profile
+):
+    # Review duzeltmesi (MAJOR-1): ai_match_score Numeric(5,2)'dir; Postgres
+    # 2 ondalik basamaktan fazlasini SESSIZCE yuvarlar. create()'in donen
+    # nesnesi artik `session.refresh()` sayesinde DB'nin GERCEKTEN
+    # sakladigi (yuvarlanmis) degeri yansitmalidir - cagiranin gonderdigi
+    # ham Python float'ini degil.
+    db_session.add(make_config_profile(account.account_id))
+    db_session.flush()
+    repo = SqlAlchemyEvaluatedJobRepository(db_session)
+
+    created = repo.create(
+        _evaluated_job(
+            account, job, ai_match_score=87.456, match_rationale=THREE_RATIONALE_ITEMS
+        )
+    )
+
+    assert created.ai_match_score == 87.46
+    # Taze bir okumayla da birebir ayni deger gelmelidir (sapma yok).
+    fetched = repo.get_by_account_and_job(account.account_id, job.job_id)
+    assert fetched.ai_match_score == created.ai_match_score
+
+
+def test_update_return_value_reflects_db_side_numeric_rounding(
+    db_session: Session, account: AccountOrm, job: JobPostingOrm, make_config_profile
+):
+    db_session.add(make_config_profile(account.account_id))
+    db_session.flush()
+    repo = SqlAlchemyEvaluatedJobRepository(db_session)
+    created = repo.create(_evaluated_job(account, job))
+
+    updated = repo.update(
+        created.model_copy(
+            update={"ai_match_score": 62.999, "match_rationale": THREE_RATIONALE_ITEMS}
+        )
+    )
+
+    assert updated.ai_match_score == 63.0
+    fetched = repo.get_by_account_and_job(account.account_id, job.job_id)
+    assert fetched.ai_match_score == updated.ai_match_score
+
+
+def test_update_preserves_original_first_seen_at_regardless_of_caller_input(
+    db_session: Session, account: AccountOrm, job: JobPostingOrm, make_config_profile
+):
+    # Review duzeltmesi (MAJOR-2): first_seen_at, bir ilanin bu hesap icin
+    # ILK ne zaman goruldugunu tasiyan tarihsel bir alandir; update() bunu
+    # asla degistirmemelidir - cagiran yanlislikla (veya kasitli) farkli
+    # bir deger gonderse bile.
+    db_session.add(make_config_profile(account.account_id))
+    db_session.flush()
+    repo = SqlAlchemyEvaluatedJobRepository(db_session)
+    original_first_seen_at = NOW
+    created = repo.create(_evaluated_job(account, job, first_seen_at=original_first_seen_at))
+
+    wrong_first_seen_at = datetime(2020, 1, 1, tzinfo=UTC)
+    updated = repo.update(
+        created.model_copy(
+            update={"status": JobStatus.SEEN, "first_seen_at": wrong_first_seen_at}
+        )
+    )
+
+    assert updated.first_seen_at == original_first_seen_at
+    assert updated.first_seen_at != wrong_first_seen_at
+    fetched = repo.get_by_account_and_job(account.account_id, job.job_id)
+    assert fetched.first_seen_at == original_first_seen_at
+
+
 def test_update_unknown_account_and_job_raises_value_error(db_session: Session):
     repo = SqlAlchemyEvaluatedJobRepository(db_session)
     ghost = EvaluatedJob(

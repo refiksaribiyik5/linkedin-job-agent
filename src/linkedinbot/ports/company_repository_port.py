@@ -17,6 +17,12 @@ kurallarinin bir parcasi degil, kalicilik detayidir; bu yuzden cagirandan
 gizlenmez ama domain modeline de eklenmez, repository tarafindan
 otomatik yonetilir (create'de ikisi de "simdi", update'te yalnizca
 last_updated_at yenilenir).
+
+`last_evaluated_timestamp` reddi (M1.3 review duzeltmesi): bu alanin
+karsilik geldigi hicbir sutun yoktur. `create()`/`update()`, bu alan
+None degilse ValueError firlatir - sessizce yutup veriyi kaybetmek
+yerine, cagirana hemen ve acikca bu alanin henuz kalici olmadigini
+bildirir.
 """
 
 from __future__ import annotations
@@ -31,7 +37,9 @@ class CompanyRepositoryPort(ABC):
 
     @abstractmethod
     def create(self, company: CompanyProfile) -> CompanyProfile:
-        """Yeni bir sirket satiri olusturur."""
+        """Yeni bir sirket satiri olusturur. `company.last_evaluated_timestamp`
+        None degilse ValueError firlatir (bkz. modul dokumani).
+        """
 
     @abstractmethod
     def get_by_id(self, company_id: str) -> CompanyProfile | None:
@@ -43,4 +51,6 @@ class CompanyRepositoryPort(ABC):
 
     @abstractmethod
     def update(self, company: CompanyProfile) -> CompanyProfile:
-        """Var olan bir sirket satirini gunceller."""
+        """Var olan bir sirket satirini gunceller. `company.last_evaluated_timestamp`
+        None degilse ValueError firlatir (bkz. modul dokumani).
+        """

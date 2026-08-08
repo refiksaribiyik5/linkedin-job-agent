@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from linkedinbot.db.models import RunLogOrm
@@ -56,6 +57,10 @@ class SqlAlchemyRunLogRepository(RunLogRepositoryPort):
         self._session.flush()
         return _to_domain(orm_run_log)
 
-    def get_by_id(self, run_id: UUID) -> RunLog | None:
-        orm_run_log = self._session.get(RunLogOrm, run_id)
+    def get_by_id(self, account_id: UUID, run_id: UUID) -> RunLog | None:
+        orm_run_log = self._session.execute(
+            select(RunLogOrm).where(
+                RunLogOrm.run_id == run_id, RunLogOrm.account_id == account_id
+            )
+        ).scalar_one_or_none()
         return _to_domain(orm_run_log) if orm_run_log is not None else None

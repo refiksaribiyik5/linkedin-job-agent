@@ -54,6 +54,9 @@ class SqlAlchemyAccountRepository(AccountRepositoryPort):
         orm_account = self._session.get(AccountOrm, account.account_id)
         if orm_account is None:
             raise ValueError(f"Guncellenecek hesap bulunamadi: {account.account_id}")
+        # created_at KASITLI OLARAK yazilmaz - olusturulma anini tasiyan
+        # tarihsel bir alandir, guncellenmemelidir (EvaluatedJobRepository.
+        # update()'in first_seen_at'i ayni gerekceyle koruyusuyla tutarli).
         orm_account.display_name = account.display_name
         orm_account.status = account.status
         orm_account.next_run_at = account.next_run_at

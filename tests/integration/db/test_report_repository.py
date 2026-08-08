@@ -53,7 +53,7 @@ def test_create_and_get_by_id_round_trip(
     )
 
     created = repo.create(report)
-    fetched = repo.get_by_id(created.report_id)
+    fetched = repo.get_by_id(account.account_id, created.report_id)
 
     assert fetched is not None
     assert fetched.run_id == run_log.run_id
@@ -62,9 +62,36 @@ def test_create_and_get_by_id_round_trip(
     assert isinstance(fetched.storage_path, Path)
 
 
-def test_get_by_id_returns_none_when_not_found(db_session: Session):
+def test_get_by_id_returns_none_when_not_found(db_session: Session, account: AccountOrm):
     repo = SqlAlchemyReportRepository(db_session)
-    assert repo.get_by_id(uuid4()) is None
+    assert repo.get_by_id(account.account_id, uuid4()) is None
+
+
+def test_get_by_id_returns_none_for_report_belonging_to_a_different_account(
+    db_session: Session, account: AccountOrm, make_config_profile
+):
+    # Review duzeltmesi (BLOCKER-1, TDD Section 14): get_by_id account_id
+    # olmadan cagirilamaz VE yanlis hesapla cagirildiginda None doner -
+    # raporun BASKA bir hesapta var oldugu bilgisi hicbir sekilde sizmaz.
+    db_session.add(make_config_profile(account.account_id))
+    run_log = _run_log(account)
+    db_session.add(run_log)
+    db_session.flush()
+    repo = SqlAlchemyReportRepository(db_session)
+    report = repo.create(
+        Report(
+            report_id=uuid4(),
+            account_id=account.account_id,
+            run_id=run_log.run_id,
+            generated_at=NOW,
+            config_snapshot_ref=1,
+            storage_path=Path("reports/x.md"),
+        )
+    )
+
+    other_account_id = uuid4()
+
+    assert repo.get_by_id(other_account_id, report.report_id) is None
 
 
 def test_get_by_run_id_returns_matching_report(
@@ -86,12 +113,37 @@ def test_get_by_run_id_returns_matching_report(
         )
     )
 
-    fetched = repo.get_by_run_id(run_log.run_id)
+    fetched = repo.get_by_run_id(account.account_id, run_log.run_id)
 
     assert fetched is not None
     assert fetched.run_id == run_log.run_id
 
 
-def test_get_by_run_id_returns_none_when_not_found(db_session: Session):
+def test_get_by_run_id_returns_none_when_not_found(db_session: Session, account: AccountOrm):
     repo = SqlAlchemyReportRepository(db_session)
-    assert repo.get_by_run_id(uuid4()) is None
+    assert repo.get_by_run_id(account.account_id, uuid4()) is None
+
+
+def test_get_by_run_id_returns_none_for_report_belonging_to_a_different_account(
+    db_session: Session, account: AccountOrm, make_config_profile
+):
+    # Ayni review duzeltmesi, get_by_run_id icin.
+    db_session.add(make_config_profile(account.account_id))
+    run_log = _run_log(account)
+    db_session.add(run_log)
+    db_session.flush()
+    repo = SqlAlchemyReportRepository(db_session)
+    repo.create(
+        Report(
+            report_id=uuid4(),
+            account_id=account.account_id,
+            run_id=run_log.run_id,
+            generated_at=NOW,
+            config_snapshot_ref=1,
+            storage_path=Path("reports/x.md"),
+        )
+    )
+
+    other_account_id = uuid4()
+
+    assert repo.get_by_run_id(other_account_id, run_log.run_id) is None

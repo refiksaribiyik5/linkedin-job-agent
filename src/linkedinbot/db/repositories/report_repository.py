@@ -46,12 +46,18 @@ class SqlAlchemyReportRepository(ReportRepositoryPort):
         self._session.flush()
         return _to_domain(orm_report)
 
-    def get_by_id(self, report_id: UUID) -> Report | None:
-        orm_report = self._session.get(ReportOrm, report_id)
+    def get_by_id(self, account_id: UUID, report_id: UUID) -> Report | None:
+        orm_report = self._session.execute(
+            select(ReportOrm).where(
+                ReportOrm.report_id == report_id, ReportOrm.account_id == account_id
+            )
+        ).scalar_one_or_none()
         return _to_domain(orm_report) if orm_report is not None else None
 
-    def get_by_run_id(self, run_id: UUID) -> Report | None:
+    def get_by_run_id(self, account_id: UUID, run_id: UUID) -> Report | None:
         orm_report = self._session.execute(
-            select(ReportOrm).where(ReportOrm.run_id == run_id)
+            select(ReportOrm).where(
+                ReportOrm.run_id == run_id, ReportOrm.account_id == account_id
+            )
         ).scalar_one_or_none()
         return _to_domain(orm_report) if orm_report is not None else None

@@ -1,4 +1,24 @@
-"""SqlAlchemyEvaluatedJobRepository - EvaluatedJobRepositoryPort'un SQLAlchemy uygulamasi."""
+"""SqlAlchemyEvaluatedJobRepository - EvaluatedJobRepositoryPort'un SQLAlchemy uygulamasi.
+
+M1.3 review duzeltmeleri (staff-engineer incelemesinde bulunan iki hata):
+
+1. `ai_match_score` Numeric(5,2) sutunudur; Postgres 2 ondalik basamaktan
+   fazla bir deger verildiginde bunu SESSIZCE yuvarlar (hata vermez).
+   `create()`/`update()` flush() sonrasi `session.refresh()` cagirmiyordu,
+   bu yuzden donen domain nesnesi hala cagiranin gonderdigi
+   YUVARLANMAMIS Python float'ini tasiyordu - veritabaninin fiilen
+   sakladigi degerden sessizce sapan bir donus degeri. Duzeltme: flush()
+   sonrasi `self._session.refresh(orm_job)` cagrilir, boylece donen
+   nesne HER ZAMAN veritabaninin gercekten sakladigi (yuvarlanmis)
+   degeri yansitir.
+2. `update()`, `first_seen_at` dahil TUM alanlari kosulsuzca uzerine
+   yaziyordu. `first_seen_at` bir ilanin bu hesap icin ilk ne zaman
+   goruldugunu tasiyan, olusturulduktan sonra ASLA degismemesi gereken
+   tarihsel bir alandir (AccountRepository.update()'in `created_at`'i
+   ayni gerekceyle korumasiyla tutarli olarak). `update()` artik bu
+   alani hic yazmaz - satirin DB'deki orijinal first_seen_at'i,
+   cagiranin ne gonderdiginden bagimsiz olarak korunur.
+"""
 
 from __future__ import annotations
 
@@ -82,6 +102,7 @@ class SqlAlchemyEvaluatedJobRepository(EvaluatedJobRepositoryPort):
             orm_job.id = evaluated_job.id
         self._session.add(orm_job)
         self._session.flush()
+        self._session.refresh(orm_job)
         return _to_domain(orm_job)
 
     def get_by_account_and_job(self, account_id: UUID, job_id: str) -> EvaluatedJob | None:
@@ -111,10 +132,12 @@ class SqlAlchemyEvaluatedJobRepository(EvaluatedJobRepositoryPort):
         orm_job.filter_result_detail = _filter_result_detail_json(evaluated_job)
         orm_job.status = evaluated_job.status
         orm_job.is_borderline = evaluated_job.is_borderline
-        orm_job.first_seen_at = evaluated_job.first_seen_at
+        # first_seen_at KASITLI OLARAK yazilmaz - bkz. modul dokumani (M1.3
+        # review duzeltmesi #2). Satirin DB'deki orijinal degeri korunur.
         orm_job.last_seen_at = evaluated_job.last_seen_at
         orm_job.report_appearances_count = evaluated_job.report_appearances_count
         orm_job.content_hash_at_evaluation = evaluated_job.content_hash_at_evaluation
         orm_job.config_version_used = evaluated_job.config_version_used
         self._session.flush()
+        self._session.refresh(orm_job)
         return _to_domain(orm_job)
