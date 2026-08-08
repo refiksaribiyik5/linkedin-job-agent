@@ -104,6 +104,53 @@ def test_wrong_encryption_key_cannot_decrypt(secrets_file: Path, encryption_key:
         reader.get("anthropic_api_key")
 
 
+def test_wrong_key_error_message_names_the_key_and_file(secrets_file: Path, encryption_key: bytes):
+    # Ic-denetimde bulunan bulgu: ham InvalidToken hicbir baglam tasimaz
+    # (hangi secret, hangi dosya) - "yanlis anahtar" ile "bozuk dosya"
+    # ayirt edilemez oluyordu. Hata mesaji artik anahtar adini ve dosya
+    # yolunu acikca icermelidir.
+    writer = LocalKeyringSecretsProvider(secrets_file, encryption_key)
+    writer.set("anthropic_api_key", "top-secret-value")
+
+    reader = LocalKeyringSecretsProvider(secrets_file, Fernet.generate_key())
+
+    with pytest.raises(InvalidToken, match="anthropic_api_key") as exc_info:
+        reader.get("anthropic_api_key")
+    assert str(secrets_file) in str(exc_info.value)
+
+
+def test_corrupted_secrets_file_raises_clear_error_naming_the_file(
+    provider: LocalKeyringSecretsProvider, secrets_file: Path
+):
+    # Ic-denetimde bulunan bulgu: json.loads() ham JSONDecodeError
+    # firlatiyordu - hangi dosyanin bozuk oldugu belirtilmeden.
+    secrets_file.parent.mkdir(parents=True, exist_ok=True)
+    secrets_file.write_text("this is not valid json{{{")
+
+    with pytest.raises(ValueError, match=str(secrets_file)):
+        provider.get("anthropic_api_key")
+
+
+def test_secrets_directory_is_not_readable_by_group_or_others(
+    tmp_path: Path, encryption_key: bytes
+):
+    # Ic-denetimde bulunan bulgu: dosya 0o600 ile korunurken, onu iceren
+    # dizin varsayilan (genellikle grup/digerleri tarafindan listelenebilir)
+    # izinlerle olusturuluyordu - dosyanin ADI (icerigi degil) baska yerel
+    # kullanicilar tarafindan kesfedilebilir kaliyordu. pytest'in kendi
+    # `tmp_path`'i zaten kisitli izinlerle geldigi icin (fixture'in
+    # KENDISI dogru sonucu maskeleyebilir), burada BILEREK YENI, ic-ice
+    # bir alt dizin kullanilir - boylece izin, pytest'ten degil, adaptorun
+    # KENDI `mkdir()` cagrisindan geldigi kanitlanir.
+    nested_path = tmp_path / "brand-new-nested-dir" / "secrets.enc"
+    provider = LocalKeyringSecretsProvider(nested_path, encryption_key)
+
+    provider.set("anthropic_api_key", "value")
+
+    mode = nested_path.parent.stat().st_mode
+    assert not (mode & 0o077), f"secrets dizini grup/digerleri tarafindan erisilebilir: {oct(mode)}"
+
+
 def test_secrets_file_is_not_readable_by_group_or_others(
     provider: LocalKeyringSecretsProvider, secrets_file: Path
 ):

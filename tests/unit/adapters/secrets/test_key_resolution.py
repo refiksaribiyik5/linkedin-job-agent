@@ -11,6 +11,8 @@ dogrulama istemleri veya kalici yan etkiler uretmemesini saglar.
 
 from __future__ import annotations
 
+import keyring.errors
+import pytest
 from cryptography.fernet import Fernet
 
 from linkedinbot.adapters.secrets import local_keyring_adapter as module_under_test
@@ -81,3 +83,36 @@ def test_generated_key_is_persisted_so_a_second_call_reuses_it(monkeypatch):
     second_call = resolve_encryption_key()
 
     assert first_call == second_call
+
+
+def test_get_password_keyring_error_raises_clear_actionable_message(monkeypatch):
+    # Ic-denetimde bulunan gercek bulgu: bir keyring backend'i olmayan bir
+    # ortamda (orn. bir Docker konteyneri - bu modulun kendi tasarim
+    # gerekcesinin ISARET ETTIGI TAM senaryo), keyring.get_password() ham
+    # NoKeyringError firlatir - "baska bir backend paketi kurun" diyen,
+    # bu depo icin YANLIS yonlendiren, LinkedInBot'a ozgu hicbir baglam
+    # tasimayan bir mesaj. Cozum ('LINKEDINBOT_SECRETS_ENCRYPTION_KEY'i
+    # ayarlayin) acikca belirtilmelidir.
+    monkeypatch.delenv("LINKEDINBOT_SECRETS_ENCRYPTION_KEY", raising=False)
+
+    def _no_backend(service, username):
+        raise keyring.errors.NoKeyringError("No recommended backend was available.")
+
+    monkeypatch.setattr(module_under_test.keyring, "get_password", _no_backend)
+
+    with pytest.raises(RuntimeError, match="LINKEDINBOT_SECRETS_ENCRYPTION_KEY"):
+        resolve_encryption_key()
+
+
+def test_set_password_keyring_error_raises_clear_actionable_message(monkeypatch):
+    # Ayni bulgu, yeni uretilen anahtarin keychain'e YAZILAMADIGI durum icin.
+    monkeypatch.delenv("LINKEDINBOT_SECRETS_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setattr(module_under_test.keyring, "get_password", lambda service, username: None)
+
+    def _cannot_persist(service, username, value):
+        raise keyring.errors.PasswordSetError("could not persist")
+
+    monkeypatch.setattr(module_under_test.keyring, "set_password", _cannot_persist)
+
+    with pytest.raises(RuntimeError, match="LINKEDINBOT_SECRETS_ENCRYPTION_KEY"):
+        resolve_encryption_key()
