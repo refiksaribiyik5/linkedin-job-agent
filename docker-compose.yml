@@ -1,0 +1,26 @@
+# M0.2 - Yerel gelistirme altyapisi.
+#
+# Bu asamada yalnizca `db` servisi vardir. Uygulama konteyneri (`app`) henuz
+# yoktur; Faz 10 / M10.1'de eklenecektir (bkz. LinkedInBot-Roadmap.md,
+# LinkedInBot-TDD.md Section 27 "Dagitim Mimarisi").
+#
+# Kimlik bilgileri .env.example'daki DATABASE_URL ile tutarlidir
+# (linkedinbot / changeme / linkedinbot). Gercek bir .env dosyasi olusturup
+# POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB degerlerini oradan
+# gecersiz kilabilirsiniz (bkz. TDD Section 27: "Konfigurasyon/secrets .env
+# ... uzerinden enjekte edilir").
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-linkedinbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-linkedinbot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
