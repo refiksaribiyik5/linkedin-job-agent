@@ -1,0 +1,116 @@
+# LinkedInBot - Sistem Varsayilan Konfigurasyonu (PRD Section 17, TDD Section 15/23)
+#
+# Bu dosya, account_config_profiles tablosunun ilk (config_version=1) satirini
+# uretmek icin M1.4'un seed script'i (linkedinbot.cli) tarafindan okunur.
+# Bu, TDD Section 23'un tam oncelik zincirinin (kod-ici varsayilanlar ->
+# system.defaults.yaml -> DB'deki hesap profili -> ortam degiskenleri) DEGIL,
+# yalnizca zincirin ikinci basamaginin (sistem varsayilanlari) somut kaynagidir.
+# Tam yukleme/dogrulama mantigi M2.1/M2.2'nin isidir; bu seed script'i
+# yalnizca bu dosyayi okuyup account_config_profiles'a bir kere yazar.
+#
+# Buradaki her deger PRD'nin Section 17 (+ 11.2, 11.3, 12.1, 13.1)
+# tablolarinda acikca belirtilen varsayilan degerdir - hicbir deger
+# icat edilmemistir.
+
+target_criteria:
+  locations:
+    - Istanbul
+  # Section 11.2: alti departman kumesi, ornek/baslangic unvan listeleriyle.
+  departments:
+    Sales & Business Development:
+      - Sales
+      - Sales Executive
+      - Key Account
+      - Account Management
+      - Business Development
+      - Business Development Executive
+      - Business Development Specialist
+    Strategy & Growth:
+      - Strategy
+      - Strategic Planning
+      - Corporate Strategy
+      - Growth
+      - Growth Strategy
+      - Strategy & Business Development
+    Marketing:
+      - Marketing
+      - Digital Marketing
+      - Brand Marketing
+      - Product Marketing
+    Trade, Logistics & Supply Chain:
+      - Trade
+      - International Trade
+      - Foreign Trade
+      - Export
+      - Import
+      - Logistics
+      - Supply Chain
+    Commercial:
+      - Commercial
+      - Commercial Excellence
+    Consulting:
+      - Consulting
+      - Management Consulting
+      - Business Consulting
+  # Section 11.3: kabul edilen deneyim seviyeleri.
+  experience_levels:
+    - Internship
+    - New Graduate
+    - Entry Level
+    - Graduate Program
+    - Management Trainee
+    - MT Program
+    - 0-2 Years Experience
+    - Junior
+
+# Section 13.1: AI Match Score bilesen agirliklari (toplam 1.0).
+weights_ai_match:
+  department_role_relevance: 0.35
+  experience_level_fit: 0.15
+  location_fit: 0.10
+  company_quality_contribution: 0.25
+  career_goal_alignment: 0.15
+
+# Section 12.1: Company Quality Score boyut agirliklari (toplam 1.0).
+weights_company_quality:
+  brand_reputation_prestige: 0.25
+  company_scale: 0.20
+  career_development_training_culture: 0.20
+  sector_position: 0.15
+  corporate_stability: 0.10
+  external_signals: 0.10
+
+thresholds:
+  company_quality_score: 50
+  ai_match_score: 60
+  department_confidence: 0.65
+  borderline_band_width: 5
+  # Section 12.4: Company Quality Score yeniden kullanim (cache tazelik) penceresi.
+  company_score_reevaluation_window_days: 30
+
+schedule:
+  interval_days: 2
+  jitter_minutes: 30
+
+collection_limits:
+  max_jobs_per_run: 200
+
+# Section 17.1: V1'de aktif kanal yok; sema Phase 2 icin simdiden ayrilir.
+notification_settings:
+  enabled: false
+  channels: []
+
+report_format_settings:
+  format: Markdown
+  template: default
+  top_matches_count: 10
+
+# M5.2'de olusturulacak prompt sablon dosyalarina referanslar (bkz. TDD
+# Section 5). Dosyalar henuz diskte yok - bu alan yalnizca versiyonlanmis
+# bir referans degeridir, M1.4 asamasinda hicbir dosya-varligi kontrolu
+# yapilmaz.
+prompt_template_refs:
+  department_matching: department_matching.prompt.md
+  experience_inference: experience_inference.prompt.md
+  company_scoring: company_scoring.prompt.md
+  ai_match_rationale: ai_match_rationale.prompt.md

@@ -1,0 +1,39 @@
+# LinkedInBot - V1'in tek hesap tohum (seed) verisi (TDD Section 5).
+#
+# display_name/career_goals/skills_summary/preferences dogrudan account +
+# user_profiles satirlarina yazilir (bkz. PRD Section 15.1, domain/user_profile.py).
+#
+# account_config_overrides, system.defaults.yaml'in UZERINE yazilan
+# (shallow merge) hesaba-ozel degerlerdir - PRD Section 15.1/17'nin "Target
+# Locations" ve "Report Format" gibi config-katmani kavramlarina karsilik
+# gelir; UserProfile.preferences'in (yalnizca blacklist icin tanimli, bkz.
+# domain/user_profile.py) PARCASI DEGILDIR.
+
+display_name: "Refik Sarıbıyık"
+status: active
+
+career_goals: >
+  Build a career in Strategy, Business Development, International Trade,
+  Sales, and AI Automation. Long-term goal is to build AI-powered SaaS
+  products for SMEs while continuously improving in software engineering,
+  business strategy, and entrepreneurship.
+
+skills_summary: >
+  Business development, international trade, sales, analytical thinking,
+  AI automation, Python, SQL, n8n, Claude Code, problem solving,
+  English (professional), project management.
+
+preferences:
+  excluded_companies: []
+  excluded_job_ids: []
+
+account_config_overrides:
+  target_criteria:
+    locations:
+      - Istanbul
+    # "remote_work: hybrid" yorumu - hem On-site hem Hybrid ilanlar kabul edilir.
+    workplace_types:
+      - On-site
+      - Hybrid
+  report_format_settings:
+    language: en

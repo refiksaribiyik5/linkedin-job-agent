@@ -14,7 +14,9 @@ authors = [{ name = "Refik Saribiyik" }]
 # Section 2 "ORM / Migration") eklenmistir. Playwright ve Anthropic SDK ve
 # APScheduler ise sirasiyla M3.1, M5.1, M9.5'te eklenecektir. TDD Section 26
 # geregi kilitli (pinned) surum kullanilir. psycopg (psycopg3), SQLAlchemy 2.x
-# ile onerilen modern PostgreSQL suruculugudur.
+# ile onerilen modern PostgreSQL suruculugudur. PyYAML (M1.4), TDD Section
+# 5/13'un config/*.yaml dosyalarini (system.defaults.yaml, accounts/*.yaml)
+# okumak icin eklenmistir - standart, tek amacli YAML ayristirici.
 #
 # NOT (uretim oncesi): "psycopg[binary]" kendi libpq/OpenSSL kopyasini
 # tasiyan onceden derlenmis bir wheel kullanir -- yerel gelistirme icin
@@ -27,7 +29,13 @@ dependencies = [
     "sqlalchemy==2.0.51",
     "alembic==1.19.0",
     "psycopg[binary]==3.3.4",
+    "pyyaml==6.0.3",
 ]
+
+# M1.4: `linkedinbot seed` komutunu (bkz. cli.py) dogrudan calistirilabilir
+# kilar; pip install -e . sonrasi "linkedinbot" komutu PATH'e eklenir.
+[project.scripts]
+linkedinbot = "linkedinbot.cli:main"
 
 # TDD Section 26 ("Baglilik hijyeni") geregi kilitli (pinned) surumler kullanilir.
 # Yeni bir surume gecis bilincli bir degisiklik olarak yapilir, otomatik surum
