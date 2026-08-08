@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linkedinbot"
+version = "0.1.0"
+description = "AI destekli, kisisel LinkedIn is ilani kesif ve degerlendirme sistemi (bkz. LinkedInBot-PRD.md, LinkedInBot-TDD.md)"
+requires-python = ">=3.12"
+authors = [{ name = "Refik Saribiyik" }]
+
+# V1 kapsaminda calisma zamani bagimliligi henuz yoktur: bu milestone (M0.1) yalnizca
+# paket/tooling iskeletini kurar. Playwright, SQLAlchemy, Pydantic, Anthropic SDK ve
+# APScheduler gibi TDD Section 2'de secilen bagimliliklar, onlari fiilen kullanan ilk
+# milestone'da (sirasiyla M3.1, M1.2, M1.1/M2.1, M5.1, M9.5) eklenir.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "N"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

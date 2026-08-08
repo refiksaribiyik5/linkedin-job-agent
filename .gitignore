@@ -1,1 +1,24 @@
 .claude/settings.local.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Sanal ortam ---
+.venv/
+venv/
+
+# --- Test / lint / tip denetimi cache'leri ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Ortam / secrets (bkz. .env.example) ---
+.env
+
+# --- Loglar ---
+*.log
