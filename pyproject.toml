@@ -15,10 +15,14 @@ authors = [{ name = "Refik Saribiyik" }]
 # milestone'da (sirasiyla M3.1, M1.2, M1.1/M2.1, M5.1, M9.5) eklenir.
 dependencies = []
 
+# TDD Section 26 ("Baglilik hijyeni") geregi kilitli (pinned) surumler kullanilir.
+# Yeni bir surume gecis bilincli bir degisiklik olarak yapilir, otomatik surum
+# kaymasi (>=) ile degil.
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.6",
-    "pytest>=8.0",
+    "ruff==0.16.2",
+    "pytest==9.1.1",
+    "import-linter==2.13",
 ]
 
 [tool.setuptools.packages.find]
@@ -34,3 +38,15 @@ select = ["E", "F", "I", "UP", "B", "SIM", "N"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# TDD Section 5 geregi: domain katmani hicbir zaman adapters katmanina bagimli
+# olamaz (Hexagonal Architecture -- bkz. TDD Section 1 Karar 2, Section 3). Bu
+# kural burada otomatik olarak denetlenir (bkz. TDD Section 26).
+[tool.importlinter]
+root_package = "linkedinbot"
+
+[[tool.importlinter.contracts]]
+name = "Domain katmani adapters'i import edemez"
+type = "forbidden"
+source_modules = ["linkedinbot.domain"]
+forbidden_modules = ["linkedinbot.adapters"]
