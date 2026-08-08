@@ -28,6 +28,8 @@ def _base_fields(**overrides):
         "status": JobStatus.NEW,
         "first_seen_at": NOW,
         "last_seen_at": NOW,
+        "content_hash_at_evaluation": "hash-abc",
+        "config_version_used": 1,
     }
     fields.update(overrides)
     return fields
@@ -35,10 +37,38 @@ def _base_fields(**overrides):
 
 def test_valid_unscored_evaluated_job():
     job = EvaluatedJob(**_base_fields())
+    assert job.id is None
     assert job.ai_match_score is None
     assert job.match_rationale is None
     assert job.is_borderline is False
     assert job.report_appearances_count == 0
+
+
+def test_id_can_be_populated_after_persistence():
+    # M1.3: id, DB-only gizli tutulmaz - repository kalicilik sonrasi bu
+    # alani doldurup nesneyi geri doner; domain kimligi yine de
+    # account_id+job_id ciftidir (bkz. modul dokumani).
+    generated_id = uuid4()
+    job = EvaluatedJob(**_base_fields(id=generated_id))
+    assert job.id == generated_id
+
+
+def test_missing_content_hash_at_evaluation_raises_validation_error():
+    fields = {k: v for k, v in _base_fields().items() if k != "content_hash_at_evaluation"}
+    with pytest.raises(ValidationError):
+        EvaluatedJob(**fields)
+
+
+def test_missing_config_version_used_raises_validation_error():
+    fields = {k: v for k, v in _base_fields().items() if k != "config_version_used"}
+    with pytest.raises(ValidationError):
+        EvaluatedJob(**fields)
+
+
+def test_config_version_used_below_one_raises_validation_error():
+    # Config versiyonlari 1'den baslar (bkz. AccountConfigProfileOrm).
+    with pytest.raises(ValidationError):
+        EvaluatedJob(**_base_fields(config_version_used=0))
 
 
 def test_valid_scored_evaluated_job_with_three_rationale_items():

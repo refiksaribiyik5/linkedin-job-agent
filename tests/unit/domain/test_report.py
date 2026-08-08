@@ -12,8 +12,9 @@ def _base_fields(**overrides):
     fields = {
         "report_id": uuid4(),
         "account_id": uuid4(),
+        "run_id": uuid4(),
         "generated_at": datetime(2026, 8, 7, tzinfo=UTC),
-        "config_snapshot_ref": "1",
+        "config_snapshot_ref": 1,
         "storage_path": "reports/some-account/2026-08-07_report.md",
     }
     fields.update(overrides)
@@ -45,5 +46,13 @@ def test_missing_storage_path_raises_validation_error():
 
 def test_missing_config_snapshot_ref_raises_validation_error():
     fields = {k: v for k, v in _base_fields().items() if k != "config_snapshot_ref"}
+    with pytest.raises(ValidationError):
+        Report(**fields)
+
+
+def test_missing_run_id_raises_validation_error():
+    # M1.3: run_id, TDD Section 16'nin run_logs (1)->(1) reports iliskisini
+    # tasir; report_id/account_id gibi asla eksik birakilamaz.
+    fields = {k: v for k, v in _base_fields().items() if k != "run_id"}
     with pytest.raises(ValidationError):
         Report(**fields)

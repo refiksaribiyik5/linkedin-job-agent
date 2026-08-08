@@ -13,6 +13,21 @@ Borderline'in durum enum'unun bir kolu degil, ayri bir boolean bayrak
 (is_borderline) olmasi gerektigini acikca belirtir. Bu modul Section 17'nin
 bu daha ayrintili/gerekceli cozumunu esas alir: JobStatus bes seviyeli
 kalir (New/Seen/Updated/Closed/Excluded) ve is_borderline ayri bir alandir.
+
+`id`, `content_hash_at_evaluation`, `config_version_used` (M1.3 eklemesi):
+M1.2'nin `evaluated_jobs` tablosu bu uc alani NOT NULL olarak tanimlar,
+ancak M1.1'de bu modul hicbirini tasimiyordu - repository katmanini
+tasarlarken ortaya cikan bir bosluktu. `content_hash_at_evaluation` (FR-14
+degisiklik tespiti) ve `config_version_used` (FR-18 onbellek anahtari)
+is-anlami tasiyan alanlardir, salt kalicilik detayi degildir; bu yuzden
+gizli/ekstra repository parametreleri olarak degil, dogrudan domain
+modeline eklenirler (DDD: domain modeli tam ve tek dogruluk kaynagi
+kalir). `id` ise farkli bir kategoridedir - surrogate bir PK'dir, is
+anlami tasimaz (domain kimligi zaten `account_id`+`job_id` ciftidir, DB'nin
+kendisi de bunu UNIQUE kisitiyla dogrular); yine de "veritabani-only" gizli
+tutulmaz, ileride API/onbellekleme/event/denetim ihtiyaclari icin acikca
+`UUID | None` olarak modellenir - repository, kalicilik sonrasi bu alani
+doldurup nesneyi geri doner.
 """
 
 from __future__ import annotations
@@ -71,6 +86,8 @@ class EvaluatedJob(BaseModel):
     gerekce varsa skor da vardir.
     """
 
+    id: UUID | None = None
+
     account_id: UUID
     job_id: str
     company_id: str
@@ -86,6 +103,9 @@ class EvaluatedJob(BaseModel):
     first_seen_at: datetime
     last_seen_at: datetime
     report_appearances_count: int = Field(default=0, ge=0)
+
+    content_hash_at_evaluation: str
+    config_version_used: int = Field(ge=1)
 
     @model_validator(mode="after")
     def _score_and_rationale_travel_together(self) -> EvaluatedJob:

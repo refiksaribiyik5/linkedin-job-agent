@@ -80,3 +80,14 @@ name = "Domain katmani adapters'i import edemez"
 type = "forbidden"
 source_modules = ["linkedinbot.domain"]
 forbidden_modules = ["linkedinbot.adapters"]
+
+# M1.3: repository Port arayuzleri (linkedinbot.ports), TDD Section 3'un
+# "Domain/Core yalnizca Port arayuzlerine bagimlidir" kuralinin somut
+# karsiligidir -- bir Port hicbir zaman kendi somut implementasyonunu
+# (db.repositories) veya baska bir adapter'i bilmemelidir, aksi halde
+# soyutlama tersine doner (adapter'a bagimli bir "arayuz" anlamsizdir).
+[[tool.importlinter.contracts]]
+name = "Ports katmani somut db/adapters implementasyonlarini import edemez"
+type = "forbidden"
+source_modules = ["linkedinbot.ports"]
+forbidden_modules = ["linkedinbot.db", "linkedinbot.adapters"]
