@@ -1,4 +1,5 @@
-"""collection/collector.py icin birim testleri (Roadmap M3.3, FR-21).
+"""collection/collector.py icin birim testleri (Roadmap M3.3, FR-21; M3.4,
+FR-2; M3.5, TDD Section 22).
 
 Roadmap M3.3 "Beklenen Sonuc": "Gecerli bir oturum ve config ile, sinirli
 sayida ham arama sonucu doner; sinira ulasilirsa collection_capped=true
@@ -17,11 +18,22 @@ kelimeler o kumenin ornek unvanlarinin tirnak icinde OR ile birlestirilmesiyle
 olusturulur (orn. `"Sales" OR "Sales Executive"`). FR-21'in `max_jobs_per_run`
 siniri, TUM bu aramalar boyunca KUMULATIF olarak uygulanir (tek bir arama
 basina degil).
+
+M3.5 (RateLimiter, TDD Section 22): `collect_raw_job_cards()` artik
+`delay_seconds`/`jitter_seconds`/`sleep` parametrelerini alir (proje
+talimatiyla acikca onaylandi: `max_jobs_per_run`'un KENDI ONCEDEN
+ONAYLANMIS deseniyle AYNI - duz fonksiyon parametreleri, config semasina
+DOKUNULMAZ). M3.3/M3.4'ten kalan testler, kendi test amaclariyla ILGISIZ
+gercek bekleme sureleri eklememesi icin `delay_seconds=0, jitter_seconds=0,
+sleep=_no_op_sleep` ile acikca guncellenir - bu, M3.5'in kendi ZORUNLU
+kildigi bir imza degisikligi, gereksiz bir "calisiyor kodu yeniden
+duzenleme" degildir.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from uuid import UUID, uuid4
 
 import pytest
@@ -39,6 +51,21 @@ from linkedinbot.config.schema import TargetCriteria
 from linkedinbot.ports.linkedin_port import LinkedInPort, SessionInvalidError
 
 ACCOUNT_ID = uuid4()
+
+
+def _no_op_sleep(seconds: float) -> None:
+    """M3.3/M3.4'ten kalan, hiz sinirlamayla ILGISIZ testler icin - bu
+    testlerin gercekten beklememesini saglar."""
+
+
+def _recording_sleep():
+    calls: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        calls.append(seconds)
+
+    _sleep.calls = calls
+    return _sleep
 
 
 class _FakeLinkedInPort(LinkedInPort):
@@ -90,7 +117,15 @@ def test_collect_raw_job_cards_builds_one_query_per_cluster_per_location():
     )
     port = _FakeLinkedInPort()
 
-    collect_raw_job_cards(port, ACCOUNT_ID, target_criteria, max_jobs_per_run=200)
+    collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        sleep=_no_op_sleep,
+    )
 
     queries = {(location, keywords) for _acc, location, keywords, _page in port.calls}
     assert queries == {
@@ -107,7 +142,15 @@ def test_collect_raw_job_cards_keywords_are_quoted_and_or_joined():
     )
     port = _FakeLinkedInPort()
 
-    collect_raw_job_cards(port, ACCOUNT_ID, target_criteria, max_jobs_per_run=200)
+    collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        sleep=_no_op_sleep,
+    )
 
     keywords_used = {keywords for _acc, _loc, keywords, _page in port.calls}
     assert keywords_used == {'"Consulting" OR "Management Consulting" OR "Business Consulting"'}
@@ -126,7 +169,13 @@ def test_collect_raw_job_cards_paginates_within_a_query_until_empty_page():
     )
 
     raw_cards, collection_capped = collect_raw_job_cards(
-        port, ACCOUNT_ID, target_criteria, max_jobs_per_run=200
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        sleep=_no_op_sleep,
     )
 
     assert raw_cards == ["card-0-a", "card-0-b", "card-1-a"]
@@ -146,7 +195,13 @@ def test_collect_raw_job_cards_stops_exactly_at_cap_mid_page():
     )
 
     raw_cards, collection_capped = collect_raw_job_cards(
-        port, ACCOUNT_ID, target_criteria, max_jobs_per_run=3
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=3,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        sleep=_no_op_sleep,
     )
 
     # Roadmap M3.3 "Tamamlanma Dogrulamasi": "tam olarak <=5 sonuc" -
@@ -170,7 +225,13 @@ def test_collect_raw_job_cards_does_not_query_further_once_capped():
     )
 
     raw_cards, collection_capped = collect_raw_job_cards(
-        port, ACCOUNT_ID, target_criteria, max_jobs_per_run=2
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=2,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        sleep=_no_op_sleep,
     )
 
     assert raw_cards == ["card-1", "card-2"]
@@ -189,7 +250,13 @@ def test_collect_raw_job_cards_not_capped_when_naturally_exhausted_below_cap():
     )
 
     raw_cards, collection_capped = collect_raw_job_cards(
-        port, ACCOUNT_ID, target_criteria, max_jobs_per_run=200
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        sleep=_no_op_sleep,
     )
 
     assert raw_cards == ["card-1", "card-2"]
@@ -200,7 +267,15 @@ def test_collect_raw_job_cards_passes_account_id_through():
     target_criteria = _target_criteria()
     port = _FakeLinkedInPort()
 
-    collect_raw_job_cards(port, ACCOUNT_ID, target_criteria, max_jobs_per_run=200)
+    collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        sleep=_no_op_sleep,
+    )
 
     assert all(acc == ACCOUNT_ID for acc, _loc, _kw, _page in port.calls)
 
@@ -213,7 +288,15 @@ def test_collect_raw_job_cards_propagates_session_invalid_error():
     target_criteria = _target_criteria()
 
     with pytest.raises(SessionInvalidError):
-        collect_raw_job_cards(_RaisingPort(), ACCOUNT_ID, target_criteria, max_jobs_per_run=200)
+        collect_raw_job_cards(
+            _RaisingPort(),
+            ACCOUNT_ID,
+            target_criteria,
+            max_jobs_per_run=200,
+            delay_seconds=0.0,
+            jitter_seconds=0.0,
+            sleep=_no_op_sleep,
+        )
 
 
 def test_collect_raw_job_cards_zero_cap_collects_nothing_and_is_capped():
@@ -228,7 +311,13 @@ def test_collect_raw_job_cards_zero_cap_collects_nothing_and_is_capped():
     )
 
     raw_cards, collection_capped = collect_raw_job_cards(
-        port, ACCOUNT_ID, target_criteria, max_jobs_per_run=0
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=0,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        sleep=_no_op_sleep,
     )
 
     assert raw_cards == []
@@ -395,3 +484,170 @@ def test_extract_records_continues_past_an_unexpected_parsing_error(monkeypatch)
     records = extract_records([WELL_FORMED_CARD, "PATHOLOGICAL", WELL_FORMED_CARD])
 
     assert len(records) == 2
+
+
+# ---------------------------------------------------------------------------
+# RateLimiter (Roadmap M3.5, TDD Section 22) - istekler arasi (Playwright'a
+# HER cagirinin ONCESINDE, ilk istek HARIC) sabit bir gecikmeye simetrik bir
+# zamanlama sapmasi (jitter) ekler. Proje talimatiyla acikca onaylanan
+# tasarim: `delay_seconds`/`jitter_seconds`/`sleep`, `max_jobs_per_run`'un
+# KENDI ONAYLANMIS deseniyle AYNI sekilde duz fonksiyon parametreleridir -
+# config semasina (config/schema.py) HICBIR SEKILDE dokunulmaz.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_raw_job_cards_does_not_delay_before_the_first_request():
+    target_criteria = _target_criteria()
+    port = _FakeLinkedInPort()  # tanimsiz sorgu -> ilk istek hemen bos doner
+    sleep = _recording_sleep()
+
+    collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=3.0,
+        jitter_seconds=1.0,
+        sleep=sleep,
+    )
+
+    # Tek bir istek yapildi (bos donen) - "istekler ARASI" gecikmenin
+    # uygulanacagi bir ikinci istek hic olmadi.
+    assert sleep.calls == []
+
+
+def test_collect_raw_job_cards_delays_between_subsequent_requests():
+    target_criteria = _target_criteria(
+        departments={
+            "Sales & Business Development": ["Sales"],
+            "Marketing": ["Marketing"],
+        }
+    )
+    port = _FakeLinkedInPort()  # her iki sorgu da hemen bos doner
+    sleep = _recording_sleep()
+
+    collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=3.0,
+        jitter_seconds=1.0,
+        sleep=sleep,
+    )
+
+    # 2 istek (2 departman sorgusu) -> aralarinda TAM OLARAK 1 gecikme.
+    assert len(sleep.calls) == 1
+
+
+def test_collect_raw_job_cards_delays_between_pages_of_the_same_query():
+    target_criteria = _target_criteria()
+    port = _FakeLinkedInPort(
+        pages_by_query={
+            ("Istanbul", '"Sales" OR "Sales Executive"'): [
+                ["card-0"],
+                ["card-1"],
+                # sayfa 2 tanimsiz -> bos doner, sayfalama burada durur
+            ],
+        }
+    )
+    sleep = _recording_sleep()
+
+    collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=3.0,
+        jitter_seconds=1.0,
+        sleep=sleep,
+    )
+
+    # 3 istek yapildi (sayfa 0, 1, 2-bos) -> aralarinda 2 gecikme. Hiz
+    # sinirlamasi yalnizca AYRI sorgular arasinda degil, AYNI sorgunun
+    # sayfalari arasinda da uygulanmalidir - her ikisi de gercek birer
+    # LinkedIn istegidir.
+    assert len(sleep.calls) == 2
+
+
+def test_collect_raw_job_cards_delay_is_within_configured_jitter_range():
+    target_criteria = _target_criteria(
+        departments={
+            "Sales & Business Development": ["Sales"],
+            "Marketing": ["Marketing"],
+            "Consulting": ["Consulting"],
+        }
+    )
+    port = _FakeLinkedInPort()
+    sleep = _recording_sleep()
+
+    collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=3.0,
+        jitter_seconds=1.0,
+        sleep=sleep,
+    )
+
+    # 3 istek -> 2 gecikme; her biri [3-1, 3+1] = [2, 4] araliginda olmali.
+    assert len(sleep.calls) == 2
+    assert all(2.0 <= duration <= 4.0 for duration in sleep.calls)
+
+
+def test_collect_raw_job_cards_delay_never_negative_when_jitter_exceeds_delay():
+    target_criteria = _target_criteria(
+        departments={
+            "Sales & Business Development": ["Sales"],
+            "Marketing": ["Marketing"],
+        }
+    )
+    port = _FakeLinkedInPort()
+    sleep = _recording_sleep()
+
+    collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.5,
+        jitter_seconds=5.0,
+        sleep=sleep,
+    )
+
+    # Jitter, gecikmeden buyuk olsa bile, negatif bir bekleme suresi asla
+    # `sleep()`'e gecilmemelidir.
+    assert len(sleep.calls) == 1
+    assert all(duration >= 0.0 for duration in sleep.calls)
+
+
+def test_collect_raw_job_cards_default_sleep_measures_real_elapsed_time():
+    # Roadmap M3.5 "Tamamlanma Dogrulamasi"nin dogrudan karsiligi: "Test
+    # calistirmasinda istekler arasi gecen sure olculur ve konfigure
+    # edilen aralikla uyumlu oldugu dogrulanir." Gercek `time.sleep`
+    # (varsayilan `sleep` parametresi) kullanilir; test suitini
+    # yavaslatmamak icin cok kucuk (milisaniye mertebesinde) degerler
+    # secilir.
+    target_criteria = _target_criteria(
+        departments={
+            "Sales & Business Development": ["Sales"],
+            "Marketing": ["Marketing"],
+        }
+    )
+    port = _FakeLinkedInPort()
+
+    start = time.monotonic()
+    collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.05,
+        jitter_seconds=0.01,
+    )
+    elapsed = time.monotonic() - start
+
+    # 2 istek -> 1 gecikme, [0.04, 0.06] araliginda olmali; yavas CI
+    # makineleri icin comert bir ust sinir birakilir.
+    assert 0.03 <= elapsed <= 0.5

@@ -1,5 +1,5 @@
 """SearchClient + PaginationController (Roadmap M3.3, FR-21) + RecordExtractor
-(Roadmap M3.4, FR-2).
+(Roadmap M3.4, FR-2) + RateLimiter (Roadmap M3.5, TDD Section 22).
 
 TDD Section 6 modul sorumluluklari tablosu: `collection` modulu "Section 17
 Target Location(s)/Departments kapsaminda arama sorgulari uretir,
@@ -48,13 +48,44 @@ GUNCEL DOM yapisina karsi CANLI olarak dogrulanamamistir (bu ortamda
 gercek bir LinkedIn hesabina/tarayiciya erisim yoktur). Bu, kullanicinin
 gercek hesabina karsi manuel olarak dogrulanmasi gereken bir varsayimdir.
 
-Istekler arasi gecikme/jitter (RateLimiter) KASITLI OLARAK burada
-YOKTUR - bu Roadmap M3.5'in scope'udur.
+M3.5 (RateLimiter, TDD Section 22) `_apply_rate_limit()`'i ekler ve
+`collect_raw_job_cards()`'in kendi istek dongusune baglar: `linkedin_port.search_jobs_page()`'e
+yapilan HER cagridan ONCE (akisin ILK istegi HARIC - ondan once "beklenecek"
+bir onceki istek yoktur), sabit bir gecikmeye (`delay_seconds`) simetrik
+bir zamanlama sapmasi (`jitter_seconds`) eklenerek uyunur. Bu, TDD Section
+22'nin "İstekler arası... Sabit gecikme + jitter" ifadesinin BIREBIR
+karsiligidir - Section 14/NFR-14'un CALISTIRMA-seviyesi (iki ayri Run
+tetiklemesi ARASINDAKI, `Schedule.jitter_minutes`) jitter'i ile
+KARISTIRILMAMALIDIR; bu, AYNI calistirma icindeki ARDISIK LinkedIn
+ISTEKLERI arasindaki gecikmedir.
+
+Proje talimatiyla acikca onaylanan tasarim karari: `delay_seconds`,
+`jitter_seconds` ve `sleep`, `max_jobs_per_run`'un KENDI ONAYLANMIS
+deseniyle (M3.3) AYNI sekilde `collect_raw_job_cards()`'a DUZ FONKSIYON
+PARAMETRELERI olarak verilir - `config/schema.py`'ye (M3.5'in "Oluşturulacak
+Dosyalar" listesinde acikca YER ALMAYAN bir dosya) HICBIR SEKILDE
+dokunulmaz. "Configure edilebilirlik," bu mekanizma-seviyesi parametreleri
+kabul etmesiyle saglanir; GERCEK degerin nereden (sabit bir varsayilan mi,
+gelecekte bir config alani mi) geldigine cagiran (henuz insa edilmemis bir
+Orchestrator, M9) karar verir. `sleep`'in varsayilani GERCEK `time.sleep`'tir
+(guvenli varsayilan - hiz sinirlamasi ACIKCA devre disi birakilmadikca
+HER ZAMAN calisir); test'lerde sahte/kaydedici bir `sleep` enjekte edilerek
+gercek bekleme suresi olmadan davranis dogrulanir.
+
+TDD Section 22'nin "tek eszamanli oturum, paralel tarayici ornegi yok"
+gereksinimi, M1-M3.4'un zaten kurdugu mimari tarafindan KARSILANMISTIR -
+`collect_raw_job_cards()` (ve butun collection/adapters.linkedin katmani)
+hicbir zaman thread/async/multiprocessing kullanmaz; bu M3.5'in YENI bir
+sey EKLEMESI gereken bir madde degildir, zaten mevcut, degismeyen bir
+mimari ozelliktir.
 """
 
 from __future__ import annotations
 
 import logging
+import random
+import time
+from collections.abc import Callable
 from uuid import UUID
 
 from bs4 import BeautifulSoup
@@ -81,16 +112,41 @@ def _build_search_keywords(titles: list[str]) -> str:
     return " OR ".join(f'"{title}"' for title in titles)
 
 
+def _apply_rate_limit(
+    sleep: Callable[[float], None], delay_seconds: float, jitter_seconds: float
+) -> None:
+    """RateLimiter: sabit bir gecikmeye simetrik bir zamanlama sapmasi
+    (jitter) ekleyip `sleep()` ile bekler (TDD Section 22 "Sabit gecikme
+    + jitter"). Hesaplanan sure hicbir zaman negatif olamaz - `jitter_seconds`,
+    `delay_seconds`'tan buyuk olsa bile `sleep()`'e her zaman `>= 0` bir
+    deger verilir.
+    """
+    # S311 (bandit "kriptografik olmayan RNG") burada bir yanlis-pozitiftir:
+    # bu jitter, istekler arasi zamanlamayi hafifce degistiren bir bot-
+    # vatandasligi onlemidir (TDD Section 22) - guvenlik/kriptografi ile
+    # ilgisi yoktur, `secrets` modulu burada yanlis arac olurdu.
+    jittered_delay = delay_seconds + random.uniform(-jitter_seconds, jitter_seconds)  # noqa: S311
+    sleep(max(0.0, jittered_delay))
+
+
 def collect_raw_job_cards(
     linkedin_port: LinkedInPort,
     account_id: UUID,
     target_criteria: TargetCriteria,
     max_jobs_per_run: int,
+    delay_seconds: float,
+    jitter_seconds: float,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[list[str], bool]:
     """PaginationController: `target_criteria`'daki her (lokasyon, departman
     kumesi) cifti icin `linkedin_port.search_jobs_page`'i sayfa sayfa
     cagirir, `max_jobs_per_run`'a (FR-21) ulasilana veya butun sorgular
     dogal olarak tukeninceye kadar (bos sayfa donene kadar) devam eder.
+
+    RateLimiter (M3.5): ILK istek HARIC, `linkedin_port.search_jobs_page()`'e
+    yapilan HER cagridan once `_apply_rate_limit()` ile beklenir - hem
+    AYRI sorgular (farkli lokasyon/departman) hem de AYNI sorgunun ardisik
+    sayfalari arasinda, cunku ikisi de gercek birer LinkedIn istegidir.
 
     Doner: `(ham_ilan_kartlari, collection_capped)` - `collection_capped`
     yalnizca sinira ulasildigi icin ERKEN durulduysa `True`'dur; tum
@@ -102,11 +158,16 @@ def collect_raw_job_cards(
     if max_jobs_per_run <= 0:
         return collected, True
 
+    is_first_request = True
     for location in target_criteria.locations:
         for titles in target_criteria.departments.values():
             keywords = _build_search_keywords(titles)
             page = 0
             while True:
+                if not is_first_request:
+                    _apply_rate_limit(sleep, delay_seconds, jitter_seconds)
+                is_first_request = False
+
                 cards = linkedin_port.search_jobs_page(account_id, location, keywords, page)
                 if not cards:
                     break
