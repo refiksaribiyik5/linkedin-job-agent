@@ -148,6 +148,38 @@ def test_normalize_record_relative_link_does_not_raise_validation_error():
         pytest.fail("Goreli link, HttpUrl dogrulama hatasina neden oldu")
 
 
+def test_normalize_record_job_id_matches_normalized_application_url_for_relative_link():
+    # Bagimsiz incelemede bulunan Kritik bulgu: job_id, application_url
+    # NORMALIZE EDILMEDEN ONCEKI ham `link` degerinden turetiliyordu -
+    # goreli bir link icin job_id ("/jobs/view/12345") ile application_url
+    # ("https://www.linkedin.com/jobs/view/12345") FARKLI dizeler
+    # oluyordu, ayni gercek ilan icin. job_id, HER ZAMAN normalize
+    # edilmis application_url'den turetilmelidir.
+    raw_record = _raw_record(link="/jobs/view/12345")
+
+    job_posting, _content_hash = normalize_record(raw_record, COLLECTED_AT)
+
+    assert job_posting.job_id == str(job_posting.application_url)
+    assert job_posting.job_id == "https://www.linkedin.com/jobs/view/12345"
+    # application_url'in kendisi de hala dogru normalize edilmis olmali.
+    assert str(job_posting.application_url) == "https://www.linkedin.com/jobs/view/12345"
+
+
+def test_normalize_record_relative_and_absolute_links_to_same_posting_produce_same_job_id():
+    # Ayni gercek LinkedIn ilanina karsi iki AYRI tarama - biri goreli,
+    # biri mutlak bir href yakalamis olabilir (DOM/tarayici davranisina
+    # bagli olarak). job_id, hangi bicimde yakalandigindan BAGIMSIZ olarak
+    # AYNI olmalidir - aksi halde M4.2'nin Diff Engine'i (bu milestone'un
+    # kapsami disinda) ayni ilani her taramada "yeni" sanirdi.
+    record_with_relative_link = _raw_record(link="/jobs/view/12345")
+    record_with_absolute_link = _raw_record(link="https://www.linkedin.com/jobs/view/12345")
+
+    job_posting_relative, _hash_1 = normalize_record(record_with_relative_link, COLLECTED_AT)
+    job_posting_absolute, _hash_2 = normalize_record(record_with_absolute_link, COLLECTED_AT)
+
+    assert job_posting_relative.job_id == job_posting_absolute.job_id
+
+
 # ---------------------------------------------------------------------------
 # compute_content_hash - FR-14: yalnizca Title/Location/Workplace
 # Type/Description

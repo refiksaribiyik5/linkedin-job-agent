@@ -99,8 +99,13 @@ def normalize_record(raw_record: RawJobRecord, collected_at: datetime) -> tuple[
     if not application_url.startswith(("http://", "https://")):
         application_url = urljoin(_LINKEDIN_BASE_URL, application_url)
 
+    # Bagimsiz incelemede bulunan Kritik bulgu duzeltmesi: job_id, HER ZAMAN
+    # normalize edilmis `application_url`'den turetilmelidir, ham
+    # `raw_record.link`'ten DEGIL - aksi halde ayni gercek ilan, goreli mi
+    # yoksa mutlak mi bir href yakalandigina bagli olarak FARKLI job_id
+    # degerleri uretirdi (bkz. testler).
     job_posting = JobPosting(
-        job_id=raw_record.link,
+        job_id=application_url,
         title=raw_record.title,
         company_id=raw_record.company,
         location=raw_record.location,
