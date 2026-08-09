@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 import pytest
 from bs4 import BeautifulSoup
 
+from linkedinbot.collection import collector as module_under_test
 from linkedinbot.collection.collector import (
     PartialRecordError,
     RawJobRecord,
@@ -359,3 +360,38 @@ def test_extract_records_preserves_order_of_successfully_extracted_records():
     records = extract_records([first_card, broken_card, second_card])
 
     assert [record.title for record in records] == ["First Job", "Second Job"]
+
+
+def test_extract_record_wraps_unexpected_parsing_errors_as_partial_record_error(monkeypatch):
+    # Bagimsiz incelemede bulunan Major bulgu: TDD Section 20, PartialRecordError'i
+    # genis bir sekilde "Tek bir ilan kaydinin ayristirilamamasi" olarak
+    # tanimlar - yalnizca "eksik/bos zorunlu alan" ile sinirli degildir.
+    # BeautifulSoup'un/secici degerlendirmesinin KENDISININ beklenmedik bir
+    # hata firlatmasi da (orn. pathological nested HTML) bir kaydin
+    # ayristirilamamasi sayilmalidir.
+    def _boom(*args, **kwargs):
+        raise RecursionError("simulated pathological HTML")
+
+    monkeypatch.setattr(module_under_test, "BeautifulSoup", _boom)
+
+    with pytest.raises(PartialRecordError):
+        extract_record(WELL_FORMED_CARD)
+
+
+def test_extract_records_continues_past_an_unexpected_parsing_error(monkeypatch):
+    # Roadmap M3.4'un kendi adinin ikinci yarisi ("...ve Kismi Hata
+    # Toleransi"): TEK bir kartin ayristirilmasindaki BEKLENMEDIK bir hata
+    # (yalnizca bilinen "alan eksik/bos" durumu degil), diger kartlarin
+    # islenmesini durdurmamalidir.
+    real_beautifulsoup = module_under_test.BeautifulSoup
+
+    def _flaky_beautifulsoup(raw_html, parser):
+        if raw_html == "PATHOLOGICAL":
+            raise RecursionError("simulated pathological HTML")
+        return real_beautifulsoup(raw_html, parser)
+
+    monkeypatch.setattr(module_under_test, "BeautifulSoup", _flaky_beautifulsoup)
+
+    records = extract_records([WELL_FORMED_CARD, "PATHOLOGICAL", WELL_FORMED_CARD])
+
+    assert len(records) == 2

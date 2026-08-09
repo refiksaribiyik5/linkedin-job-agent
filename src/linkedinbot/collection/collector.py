@@ -165,16 +165,31 @@ def extract_record(raw_html: str) -> RawJobRecord:
     """Tek bir ham ilan karti HTML'sinden FR-2'nin minimum alan setini
     cikarir. Herhangi bir alan bulunamazsa veya bossa `PartialRecordError`
     firlatir - cagiran (`extract_records()`) bunu yakalayip karti atlar.
+
+    TDD Section 20, `PartialRecordError`'i genis bir sekilde "Tek bir ilan
+    kaydinin ayristirilamamasi" olarak tanimlar - yalnizca "eksik/bos
+    zorunlu alan" ile sinirli degildir. Bu yuzden ayristirma sirasinda
+    (BeautifulSoup'un kendisi veya secici degerlendirmesi) beklenmedik
+    herhangi baska bir hata olusursa da, bu KASITLI OLARAK `PartialRecordError`'a
+    donusturulur (ozgun hata `from exc` ile zincirlenerek) - boylece tek
+    bir kartin ayristirilmasindaki HERHANGI bir hata, `extract_records()`'in
+    diger kartlarin islenmesine devam etmesini engellemez (Roadmap M3.4
+    "...ve Kismi Hata Toleransi").
     """
-    card = BeautifulSoup(raw_html, "html.parser")
-    return RawJobRecord(
-        title=_extract_text(card, _TITLE_SELECTOR, "title"),
-        company=_extract_text(card, _COMPANY_SELECTOR, "company"),
-        location=_extract_text(card, _LOCATION_SELECTOR, "location"),
-        posted_date=_extract_text(card, _DATE_SELECTOR, "posted_date"),
-        description=_extract_text(card, _DESCRIPTION_SELECTOR, "description"),
-        link=_extract_link(card, _LINK_SELECTOR),
-    )
+    try:
+        card = BeautifulSoup(raw_html, "html.parser")
+        return RawJobRecord(
+            title=_extract_text(card, _TITLE_SELECTOR, "title"),
+            company=_extract_text(card, _COMPANY_SELECTOR, "company"),
+            location=_extract_text(card, _LOCATION_SELECTOR, "location"),
+            posted_date=_extract_text(card, _DATE_SELECTOR, "posted_date"),
+            description=_extract_text(card, _DESCRIPTION_SELECTOR, "description"),
+            link=_extract_link(card, _LINK_SELECTOR),
+        )
+    except PartialRecordError:
+        raise
+    except Exception as exc:
+        raise PartialRecordError(f"Ilan karti ayristirilamadi: {exc}") from exc
 
 
 def extract_records(raw_cards: list[str]) -> list[RawJobRecord]:
