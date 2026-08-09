@@ -8,20 +8,37 @@ dogrulama/yenileme (FR-1)" sorumluluguyla); Section 9 ise SessionManager'i
 somut kod karsiligidir - Collection Service (M3.3+) ileride bu arayuze
 bagimli olacak, Playwright'a degil.
 
-M3.1 KAPSAMI (Roadmap "yalnizca login+kaydetme yolu"): bu asamada Port
+M3.1 KAPSAMI (Roadmap "yalnizca login+kaydetme yolu"): o asamada Port
 yalnizca `ensure_session()` - zaten kalici bir oturum yoksa interaktif
 girisi tetikleyip sonucu kalici hale getiren, VARSA hicbir sey yapmayan
-(idempotent) TEK bir metod - icerir. Oturumun hala GECERLI olup olmadigini
-(sunucu tarafinda suresi dolmus mu) dogrulayan ayri bir `validate()`
-metodu KASITLI OLARAK burada YOKTUR - bu, Roadmap M3.2'nin ("Oturum
-Dogrulama") acikca ayrilmis kapsamidir; Collection Service'in
-kullanacagi arama/sayfalama metodlari (M3.3+) de henuz eklenmemistir.
+(idempotent) TEK bir metod - icerdi. Collection Service'in kullanacagi
+arama/sayfalama metodlari (M3.3+) henuz eklenmemistir.
+
+M3.2 KAPSAMI (Roadmap "Oturum Dogrulama", FR-1): Port'a `validate()`
+eklenir - kalici bir oturumun HALA gecerli olup olmadigini (sunucu
+tarafinda suresi dolmus mu) canli olarak kontrol eder. Gecersiz bir
+oturum `SessionInvalidError` firlatir; TDD Section 20'nin hata
+taksonomisinde bu bir `PermanentError` olarak siniflandirilir (retry
+edilmez) - ama o merkezi taksonomi sinifi (`PermanentError` temel
+sinifi) henuz insa edilmemistir (Roadmap M9.3, "Hata Siniflandirma +
+Retry"); bu yuzden `SessionInvalidError` simdilik bagimsiz, kendi
+basina bir exception olarak tanimlanir, var olmayan bir taksonomi
+sinifindan miras almaz.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from uuid import UUID
+
+
+class SessionInvalidError(Exception):
+    """Verilen hesap icin kalici bir LinkedIn oturumu yoktur veya artik
+    LinkedIn tarafindan kabul edilmiyor (FR-1). `LinkedInPort.validate()`
+    tarafindan firlatilir; genel bir crash degil, cagiranin (ileride Run
+    Orchestrator, M9) ayirt edip Run'i "Failed" olarak isaretleyebilecegi
+    tanimli bir hata turudur (bkz. TDD Section 9/20).
+    """
 
 
 class LinkedInPort(ABC):
@@ -36,4 +53,13 @@ class LinkedInPort(ABC):
         surecin tekrar tekrar calistirilmasinin (orn. bir sonraki
         zamanlanmis calistirmada) yeniden interaktif giris istememesini
         garanti eder (Roadmap M3.1 "Beklenen Sonuc").
+        """
+
+    @abstractmethod
+    def validate(self, account_id: UUID) -> None:
+        """Verilen hesap icin kalici oturumun HALA gecerli olup olmadigini
+        canli olarak (LinkedIn'e karsi) kontrol eder. Gecersiz, suresi
+        dolmus veya hic var olmayan bir oturum sessizce yutulmaz -
+        `SessionInvalidError` firlatilir (FR-1). Gecerliyse hicbir sey
+        firlatmadan doner.
         """

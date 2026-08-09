@@ -17,6 +17,18 @@ Kullanici cok uzun sure giris sayfasinda kalirsa/vazgecerse (2FA
 tamamlanmaz, tarayici kapatilir vb.), `LoginTimeoutError` firlatilir -
 Playwright'in kendi ham `TimeoutError`'i "ne bekleniyordu" baglamini
 tasimaz.
+
+M3.2 (Roadmap "Oturum Dogrulama", FR-1) `check_session_is_valid()`'i
+ekler: kayitli bir `storage_state`'in HALA gecerli olup olmadigini,
+insan mudahalesi olmadan (headless), canli olarak LinkedIn'e karsi
+kontrol eder. `perform_interactive_login()`'den farki - burada beklenen
+bir "insan tamamlar" adimi yoktur; sonuc, kimlik dogrulama gerektiren
+bir sayfaya gidildiginde (sunucu tarafinda ANINDA redirect ile) zaten
+bellidir, bu yuzden `wait_for_url` ile bir sey "beklemeye" gerek yoktur.
+Bir ag/navigasyon hatasi (orn. zaman asimi, DNS) BILEREK "gecersiz
+oturum" olarak yeniden siniflandirilmaz/yutulmaz - bu, TDD Section
+20'nin ayirdigi iki farkli hata sinifidir (TransientError vs
+PermanentError); byle bir hata oldugu gibi yukari sizar.
 """
 
 from __future__ import annotations
@@ -27,6 +39,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 LOGIN_URL = "https://www.linkedin.com/login"
+SESSION_CHECK_URL = "https://www.linkedin.com/feed/"
 _AUTHENTICATED_URL_PATTERN = "**/feed/**"
 # 5 dakika - kullanicinin 2FA/CAPTCHA tamamlamasi icin makul, cömert bir sure
 # (Roadmap M3.1 "gercek giris akisinda beklenmedik surtunme olasidir").
@@ -63,5 +76,30 @@ def perform_interactive_login() -> dict[str, Any]:
                     "yarim mi kaldi?)."
                 ) from exc
             return context.storage_state()
+        finally:
+            browser.close()
+
+
+def check_session_is_valid(storage_state: dict[str, Any]) -> bool:
+    """Verilen `storage_state`'i (cerezler + local storage) yeni, gorunmez
+    (`headless=True`) bir tarayici baglaminda yukleyip, kimlik dogrulama
+    gerektiren bir LinkedIn sayfasina (`SESSION_CHECK_URL`) gidilerek
+    oturumun HALA gecerli olup olmadigini kontrol eder.
+
+    Gecersiz/suresi dolmus bir oturum, LinkedIn'i sunucu tarafinda
+    dogrudan giris sayfasina yonlendirmeye zorlar - bu yuzden `goto()`
+    tamamlandiktan hemen sonra `page.url`'nin hala kimlik dogrulanmis
+    sayfada olup olmadigina bakmak yeterlidir; M3.1'deki gibi bir insanin
+    tamamlamasini "beklemek" (wait_for_url/timeout) burada anlamsizdir.
+
+    Tarayici, basarili/basarisiz her durumda kapatilir (try/finally).
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            context = browser.new_context(storage_state=storage_state)
+            page = context.new_page()
+            page.goto(SESSION_CHECK_URL)
+            return SESSION_CHECK_URL in page.url
         finally:
             browser.close()

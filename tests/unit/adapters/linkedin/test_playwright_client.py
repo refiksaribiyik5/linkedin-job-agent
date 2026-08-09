@@ -18,19 +18,32 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from linkedinbot.adapters.linkedin import playwright_client as module_under_test
 from linkedinbot.adapters.linkedin.playwright_client import (
     LOGIN_URL,
+    SESSION_CHECK_URL,
     LoginTimeoutError,
+    check_session_is_valid,
     perform_interactive_login,
 )
 
 
 class _FakePage:
-    def __init__(self, raise_on_wait: Exception | None = None):
+    def __init__(
+        self,
+        raise_on_wait: Exception | None = None,
+        landing_url: str | None = None,
+        raise_on_goto: Exception | None = None,
+    ):
         self.goto_calls: list[str] = []
         self.wait_for_url_calls: list[tuple[str, int]] = []
         self._raise_on_wait = raise_on_wait
+        self._landing_url = landing_url
+        self._raise_on_goto = raise_on_goto
+        self.url = ""
 
     def goto(self, url: str) -> None:
         self.goto_calls.append(url)
+        if self._raise_on_goto is not None:
+            raise self._raise_on_goto
+        self.url = self._landing_url if self._landing_url is not None else url
 
     def wait_for_url(self, pattern: str, timeout: int) -> None:
         self.wait_for_url_calls.append((pattern, timeout))
@@ -54,8 +67,10 @@ class _FakeBrowser:
     def __init__(self, context: _FakeContext):
         self._context = context
         self.closed = False
+        self.new_context_kwargs: dict | None = None
 
-    def new_context(self) -> _FakeContext:
+    def new_context(self, **kwargs) -> _FakeContext:
+        self.new_context_kwargs = kwargs
         return self._context
 
     def close(self) -> None:
@@ -77,8 +92,16 @@ class _FakePlaywright:
         self.chromium = chromium
 
 
-def _install_fake_playwright(monkeypatch, *, raise_on_wait: Exception | None = None):
-    page = _FakePage(raise_on_wait=raise_on_wait)
+def _install_fake_playwright(
+    monkeypatch,
+    *,
+    raise_on_wait: Exception | None = None,
+    landing_url: str | None = None,
+    raise_on_goto: Exception | None = None,
+):
+    page = _FakePage(
+        raise_on_wait=raise_on_wait, landing_url=landing_url, raise_on_goto=raise_on_goto
+    )
     context = _FakeContext(page)
     browser = _FakeBrowser(context)
     chromium = _FakeChromium(browser)
@@ -170,3 +193,101 @@ def test_perform_interactive_login_timeout_message_is_actionable(monkeypatch):
 
     with pytest.raises(LoginTimeoutError, match="giris"):
         perform_interactive_login()
+
+
+# ---------------------------------------------------------------------------
+# check_session_is_valid (Roadmap M3.2) - kayitli bir storage_state'in HALA
+# gecerli olup olmadigini, insan mudahalesi olmadan (headless), canli olarak
+# kontrol eder. M3.1'in interaktif giris akisindan farkli olarak burada
+# beklenen bir "insan tamamlar" adimi yoktur - ya oturum kabul edilir ya da
+# edilmez, sonuc `goto()` tamamlaninca zaten bellidir.
+# ---------------------------------------------------------------------------
+
+FAKE_STORED_STATE = {"cookies": [{"name": "li_at", "value": "previously-stored-session"}]}
+
+
+def test_check_session_is_valid_launches_headless_browser(monkeypatch):
+    # M3.1'in aksine burada hicbir insan mudahalesi beklenmez - gorunur bir
+    # pencereye gerek yoktur.
+    _page, _context, _browser, chromium = _install_fake_playwright(
+        monkeypatch, landing_url=SESSION_CHECK_URL
+    )
+
+    check_session_is_valid(FAKE_STORED_STATE)
+
+    assert chromium.launch_kwargs == {"headless": True}
+
+
+def test_check_session_is_valid_loads_the_given_storage_state(monkeypatch):
+    _page, _context, browser, _chromium = _install_fake_playwright(
+        monkeypatch, landing_url=SESSION_CHECK_URL
+    )
+
+    check_session_is_valid(FAKE_STORED_STATE)
+
+    assert browser.new_context_kwargs == {"storage_state": FAKE_STORED_STATE}
+
+
+def test_check_session_is_valid_navigates_to_session_check_url(monkeypatch):
+    page, _context, _browser, _chromium = _install_fake_playwright(
+        monkeypatch, landing_url=SESSION_CHECK_URL
+    )
+
+    check_session_is_valid(FAKE_STORED_STATE)
+
+    assert page.goto_calls == [SESSION_CHECK_URL]
+
+
+def test_check_session_is_valid_returns_true_when_still_on_authenticated_page(monkeypatch):
+    _page, _context, _browser, _chromium = _install_fake_playwright(
+        monkeypatch, landing_url=SESSION_CHECK_URL
+    )
+
+    assert check_session_is_valid(FAKE_STORED_STATE) is True
+
+
+def test_check_session_is_valid_returns_false_when_redirected_to_login(monkeypatch):
+    # Sunucu tarafinda gecersiz/suresi dolmus bir oturum, LinkedIn'i
+    # dogrudan giris sayfasina yonlendirmeye zorlar - bu, "invalidate the
+    # session by deleting a cookie" (Roadmap M3.2 Tamamlanma Dogrulamasi)
+    # senaryosunun canli davranis karsiligidir.
+    _page, _context, _browser, _chromium = _install_fake_playwright(
+        monkeypatch, landing_url="https://www.linkedin.com/login"
+    )
+
+    assert check_session_is_valid(FAKE_STORED_STATE) is False
+
+
+def test_check_session_is_valid_closes_browser_after_check(monkeypatch):
+    _page, _context, browser, _chromium = _install_fake_playwright(
+        monkeypatch, landing_url=SESSION_CHECK_URL
+    )
+
+    check_session_is_valid(FAKE_STORED_STATE)
+
+    assert browser.closed is True
+
+
+def test_check_session_is_valid_closes_browser_even_if_navigation_fails(monkeypatch):
+    _page, _context, browser, _chromium = _install_fake_playwright(
+        monkeypatch, raise_on_goto=RuntimeError("simulated network failure")
+    )
+
+    with pytest.raises(RuntimeError, match="simulated network failure"):
+        check_session_is_valid(FAKE_STORED_STATE)
+
+    assert browser.closed is True
+
+
+def test_check_session_is_valid_does_not_reclassify_navigation_errors(monkeypatch):
+    # Onemli ayrim (TDD Section 20: TransientError vs PermanentError): bir
+    # ag/navigasyon hatasi "oturum gecersiz" DEGILDIR - bu iki ayri hata
+    # sinifidir. check_session_is_valid() bir navigasyon hatasini
+    # SESSIZCE False'a cevirmemeli/yutmamalidir; ham hata oldugu gibi
+    # yukari sizmalidir (siniflandirma cagiranin/gelecekteki M9.3'un isidir).
+    _page, _context, _browser, _chromium = _install_fake_playwright(
+        monkeypatch, raise_on_goto=RuntimeError("simulated network failure")
+    )
+
+    with pytest.raises(RuntimeError, match="simulated network failure"):
+        check_session_is_valid(FAKE_STORED_STATE)
