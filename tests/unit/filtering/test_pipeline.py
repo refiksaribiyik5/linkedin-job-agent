@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from linkedinbot.domain.job_posting import JobPosting
 from linkedinbot.domain.user_profile import Preferences
 from linkedinbot.filtering.department_filter import DepartmentMatchInference
+from linkedinbot.filtering.experience_filter import ExperienceLevelInference
 from linkedinbot.filtering.pipeline import PipelineResult, run_filtering_pipeline
 
 COLLECTED_AT = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
@@ -78,7 +79,14 @@ class _StubLLMGateway:
         self.calls: list[dict] = []
 
     def generate(self, template_name, response_model, model, **template_variables):
-        self.calls.append({"template_name": template_name, **template_variables})
+        self.calls.append(
+            {
+                "template_name": template_name,
+                "response_model": response_model,
+                "model": model,
+                **template_variables,
+            }
+        )
         job_title = template_variables["job_title"]
         if template_name == "experience_inference":
             return self._experience_by_title[job_title]
@@ -140,6 +148,47 @@ def test_disqualified_experience_job_is_rejected_without_calling_department():
     assert result.is_borderline is False
     assert set(result.filter_result_detail) == {"blacklist", "location", "experience"}
     assert llm_gateway.calls == []
+
+
+def test_ambiguous_experience_case_is_routed_through_the_pipelines_llm_gateway_correctly():
+    # M6.5 review finding (Minor): hicbir mevcut test, Deneyim asamasinin
+    # LLM-fallback cagri noktasini pipeline UZERINDEN calistirmiyordu -
+    # digerlerinin hepsi kural-tabanli sinyalle cozuluyordu. Bu test,
+    # ne kabul-listesi ne de disqualifying bir sinyal tasimayan (M6.3'un
+    # kendi "belirsiz durum" fixture'iyla AYNI) bir baslik/aciklama
+    # kullanarak LLM yoluna GERCEKTEN dusulmesini VE pipeline'in dogru
+    # `accepted_experience_levels`/`model`/`response_model` degerlerini bu
+    # cagri noktasina dogru sekilde ilettigini dogrular.
+    job_posting = _job_posting(
+        title="Business Development Associate",
+        description="Join our commercial team and grow with us.",
+    )
+    llm_gateway = _StubLLMGateway(
+        experience_by_title={
+            "Business Development Associate": ExperienceLevelInference(
+                matches_accepted_level=True, reasoning="Entry-level tone."
+            )
+        },
+        department_by_title={
+            "Business Development Associate": DepartmentMatchInference(
+                matched_cluster="Sales & Business Development", confidence=0.9, reasoning="Fits."
+            )
+        },
+    )
+
+    result = _run_one(job_posting, llm_gateway)
+
+    assert result.passed is True
+    experience_calls = [
+        call for call in llm_gateway.calls if call["template_name"] == "experience_inference"
+    ]
+    assert len(experience_calls) == 1
+    call = experience_calls[0]
+    assert call["response_model"] is ExperienceLevelInference
+    assert call["model"] == TEST_MODEL
+    assert call["job_title"] == job_posting.title
+    assert call["job_description"] == job_posting.description
+    assert call["accepted_experience_levels"] == ", ".join(ACCEPTED_EXPERIENCE_LEVELS)
 
 
 def test_job_passing_all_four_filters_is_accepted_and_not_borderline():
