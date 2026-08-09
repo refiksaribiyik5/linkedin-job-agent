@@ -21,11 +21,19 @@ basina degil).
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID, uuid4
 
 import pytest
+from bs4 import BeautifulSoup
 
-from linkedinbot.collection.collector import collect_raw_job_cards
+from linkedinbot.collection.collector import (
+    PartialRecordError,
+    RawJobRecord,
+    collect_raw_job_cards,
+    extract_record,
+    extract_records,
+)
 from linkedinbot.config.schema import TargetCriteria
 from linkedinbot.ports.linkedin_port import LinkedInPort, SessionInvalidError
 
@@ -225,3 +233,129 @@ def test_collect_raw_job_cards_zero_cap_collects_nothing_and_is_capped():
     assert raw_cards == []
     assert collection_capped is True
     assert port.calls == []
+
+
+# ---------------------------------------------------------------------------
+# RecordExtractor (Roadmap M3.4, FR-2) - her ham ilan karti HTML'sinden
+# FR-2'nin minimum alan setini (baslik, sirket, lokasyon, tarih, aciklama,
+# link) cikarir. Bozuk bir kart PartialRecordError olarak yakalanip
+# atlanir; akis (diger kartlarin islenmesi) durmaz (Roadmap M3.4 "Beklenen
+# Sonuc"). M3.3'un `collect_raw_job_cards()`'i KASITLI OLARAK degistirilmez
+# (proje talimatiyla acikca onaylandi) - RecordExtractor, o fonksiyonun
+# ciktisi (ham HTML dizeleri) uzerinde AYRI, sonraki bir adim olarak calisir.
+# ---------------------------------------------------------------------------
+
+WELL_FORMED_CARD = """
+<div class="job-card-container">
+  <h3 class="job-card-title">Sales Executive</h3>
+  <span class="job-card-company">Acme Corp</span>
+  <span class="job-card-location">Istanbul, Turkey</span>
+  <time class="job-card-date">3 days ago</time>
+  <p class="job-card-description">We are looking for a Sales Executive to join our team.</p>
+  <a class="job-card-link" href="https://www.linkedin.com/jobs/view/12345">View</a>
+</div>
+"""
+
+
+def _card_missing(field_class: str) -> str:
+    """WELL_FORMED_CARD'in bir kopyasini, verilen alan sinifina sahip
+    elemani tamamen kaldirarak uretir (o alanin HIC bulunamadigi durumu
+    simule eder)."""
+    soup = BeautifulSoup(WELL_FORMED_CARD, "html.parser")
+    element = soup.select_one(f".{field_class}") or soup.select_one(field_class)
+    if element is not None:
+        element.decompose()
+    return str(soup)
+
+
+def test_extract_record_extracts_all_minimum_fields_from_well_formed_card():
+    record = extract_record(WELL_FORMED_CARD)
+
+    assert record == RawJobRecord(
+        title="Sales Executive",
+        company="Acme Corp",
+        location="Istanbul, Turkey",
+        posted_date="3 days ago",
+        description="We are looking for a Sales Executive to join our team.",
+        link="https://www.linkedin.com/jobs/view/12345",
+    )
+
+
+def test_extract_record_raises_partial_record_error_when_title_missing():
+    with pytest.raises(PartialRecordError, match="title"):
+        extract_record(_card_missing("job-card-title"))
+
+
+def test_extract_record_raises_partial_record_error_when_company_missing():
+    with pytest.raises(PartialRecordError, match="company"):
+        extract_record(_card_missing("job-card-company"))
+
+
+def test_extract_record_raises_partial_record_error_when_location_missing():
+    with pytest.raises(PartialRecordError, match="location"):
+        extract_record(_card_missing("job-card-location"))
+
+
+def test_extract_record_raises_partial_record_error_when_date_missing():
+    with pytest.raises(PartialRecordError, match="posted_date"):
+        extract_record(_card_missing("job-card-date"))
+
+
+def test_extract_record_raises_partial_record_error_when_description_missing():
+    with pytest.raises(PartialRecordError, match="description"):
+        extract_record(_card_missing("job-card-description"))
+
+
+def test_extract_record_raises_partial_record_error_when_link_missing():
+    with pytest.raises(PartialRecordError, match="link"):
+        extract_record(_card_missing("job-card-link"))
+
+
+def test_extract_record_raises_partial_record_error_when_field_present_but_empty():
+    card = """
+    <div class="job-card-container">
+      <h3 class="job-card-title">   </h3>
+      <span class="job-card-company">Acme Corp</span>
+      <span class="job-card-location">Istanbul, Turkey</span>
+      <time class="job-card-date">3 days ago</time>
+      <p class="job-card-description">Some description.</p>
+      <a class="job-card-link" href="https://www.linkedin.com/jobs/view/12345">View</a>
+    </div>
+    """
+    with pytest.raises(PartialRecordError, match="title"):
+        extract_record(card)
+
+
+def test_extract_records_skips_broken_card_and_processes_others():
+    broken_card = _card_missing("job-card-title")
+    raw_cards = [WELL_FORMED_CARD, broken_card, WELL_FORMED_CARD]
+
+    records = extract_records(raw_cards)
+
+    # Roadmap M3.4 "Beklenen Sonuc": bozuk kart atlanir, akis DEVAM EDER -
+    # diger IKI gecerli kart islenmis olmalidir.
+    assert len(records) == 2
+    assert all(record.title == "Sales Executive" for record in records)
+
+
+def test_extract_records_logs_a_warning_when_a_card_is_skipped(caplog):
+    broken_card = _card_missing("job-card-title")
+
+    with caplog.at_level(logging.WARNING):
+        extract_records([broken_card])
+
+    assert any("title" in message for message in caplog.messages)
+
+
+def test_extract_records_returns_empty_list_for_empty_input():
+    assert extract_records([]) == []
+
+
+def test_extract_records_preserves_order_of_successfully_extracted_records():
+    first_card = WELL_FORMED_CARD.replace("Sales Executive", "First Job")
+    second_card = WELL_FORMED_CARD.replace("Sales Executive", "Second Job")
+    broken_card = _card_missing("job-card-title")
+
+    records = extract_records([first_card, broken_card, second_card])
+
+    assert [record.title for record in records] == ["First Job", "Second Job"]

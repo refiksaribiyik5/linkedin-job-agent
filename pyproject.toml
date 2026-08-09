@@ -34,7 +34,14 @@ authors = [{ name = "Refik Saribiyik" }]
 # (M3.1), TDD Section 2'nin "Tarayici Otomasyonu" secimi - LinkedIn'e
 # oturum tabanli (storage_state) erisim icin. `playwright install
 # chromium` ayrica calistirilmalidir (bu paket yalnizca Python
-# bagimliligidir, tarayici ikili dosyalarini ayrica indirir).
+# bagimliligidir, tarayici ikili dosyalarini ayrica indirir). beautifulsoup4
+# (M3.4), RecordExtractor'in M3.3'un urettigi ham ilan karti HTML
+# dizelerinden FR-2'nin minimum alan setini (baslik, sirket, lokasyon,
+# tarih, aciklama, link) cikarmasi icin - proje talimatiyla acikca
+# onaylandi, yalnizca bu tek amac icin eklendi. Ek bir ayristirici backend
+# (orn. lxml) KASITLI OLARAK eklenmedi - Python'in kendi yerlesik
+# `html.parser`i BeautifulSoup icin yeterlidir (talimat: "yalnizca
+# RecordExtractor icin gereken minimum bagimlilik").
 dependencies = [
     "pydantic==2.13.4",
     "sqlalchemy==2.0.51",
@@ -44,6 +51,7 @@ dependencies = [
     "cryptography==46.0.7",
     "keyring==25.7.0",
     "playwright==1.62.0",
+    "beautifulsoup4==4.15.0",
 ]
 
 # M1.4: `linkedinbot seed` komutunu (bkz. cli.py) dogrudan calistirilabilir
