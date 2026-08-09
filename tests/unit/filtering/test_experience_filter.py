@@ -205,9 +205,20 @@ def test_ambiguous_case_with_unavailable_llm_inference_is_rejected_by_default():
 
 
 def test_experience_filter_never_sets_a_confidence_value():
+    # `title="Team Lead"` alone YETERSIZDIR: `_job_posting()`'in varsayilan
+    # `description`'i ("Entry Level role for recent graduates.") EDGE-12
+    # onceligi geregi kabul sinyaline doner ve rejection dalini hic
+    # calistirmaz (bkz. self-review bulgusu). Aciklama da acikca
+    # disqualifying/sinyal-siz tutularak (mevcut, ayrica dogrulanmis
+    # `test_explicit_seniority_title_is_rejected_without_calling_the_llm`
+    # fixture'iyla AYNI) GERCEKTEN red dalinin calistigi garanti edilir.
     rule_based = filter_by_experience_level(
-        _job_posting(title="Team Lead"), ACCEPTED_LEVELS, _FakeLLMGateway(result=None), TEST_MODEL
+        _job_posting(title="Team Lead", description="Leading a small team."),
+        ACCEPTED_LEVELS,
+        _FakeLLMGateway(result=None),
+        TEST_MODEL,
     )
+    assert rule_based.passed is False
     llm_based = filter_by_experience_level(
         _job_posting(title="Business Development Associate", description="Grow with us."),
         ACCEPTED_LEVELS,
