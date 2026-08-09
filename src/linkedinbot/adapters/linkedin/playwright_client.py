@@ -29,21 +29,49 @@ Bir ag/navigasyon hatasi (orn. zaman asimi, DNS) BILEREK "gecersiz
 oturum" olarak yeniden siniflandirilmaz/yutulmaz - bu, TDD Section
 20'nin ayirdigi iki farkli hata sinifidir (TransientError vs
 PermanentError); byle bir hata oldugu gibi yukari sizar.
+
+M3.3 (Roadmap "Arama & Sayfalama", FR-21) `fetch_search_results_page()`'i
+ekler: kalici bir `storage_state`'i kullanarak, verilen (location,
+keywords) sorgusu icin LinkedIn is arama sonuclarinin TEK bir sayfasindaki
+ham ilan karti HTML'lerini doner. Sayfalama MANTIGI (kac sayfa gidilecegi,
+FR-21'in ust siniri, `collection_capped` bayragi) BURADA YOKTUR - proje
+talimatiyla acikca onaylandigi gibi bu, `collection/collector.py`'nin
+(PaginationController) sorumlulugudur; bu fonksiyon Playwright'in
+kendisiyle ilgili SAF bir altyapi ilkelidir (tek sayfa getir, ham
+HTML'leri don), TDD Section 6'nin `collection` modulunu yalnizca
+`linkedin_port`'a bagimli kilma karariyla tutarli - gercek Playwright
+detaylari `collection/collector.py`'ye hicbir zaman sizmaz.
+
+BILINEN SINIRLAMA (M3.1/M3.2'nin ayni dipnotu burada da gecerlidir):
+`SEARCH_URL`/`_JOB_CARD_SELECTOR`, LinkedIn'in GERCEK, GUNCEL DOM/URL
+yapisina karsi CANLI olarak dogrulanamamistir (bu ortamda gercek bir
+LinkedIn hesabina/tarayiciya erisim yoktur - Roadmap M3.3'un kendi
+"Tahmini Sure" notu da "LinkedIn'in DOM/secici kirilganligi en buyuk
+risk" der). Bu, kullanicinin gercek hesabina karsi manuel olarak
+dogrulanmasi gereken bir varsayimdir.
 """
 
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote_plus
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 LOGIN_URL = "https://www.linkedin.com/login"
 SESSION_CHECK_URL = "https://www.linkedin.com/feed/"
+SEARCH_URL = "https://www.linkedin.com/jobs/search/"
 _AUTHENTICATED_URL_PATTERN = "**/feed/**"
 # 5 dakika - kullanicinin 2FA/CAPTCHA tamamlamasi icin makul, cömert bir sure
 # (Roadmap M3.1 "gercek giris akisinda beklenmedik surtunme olasidir").
 _LOGIN_TIMEOUT_MS = 5 * 60 * 1000
+# LinkedIn'in is arama sonuc sayfasinin (bilinen, ama canli dogrulanmamis)
+# geleneksel sayfalama boyutu - `start` parametresi bu birimde ilerler.
+_RESULTS_PER_PAGE = 25
+# Her bir ilan karti DOM elemanini secen CSS secici - bkz. modul dokumaninin
+# "BILINEN SINIRLAMA" notu.
+_JOB_CARD_SELECTOR = "div.job-card-container"
 
 
 class LoginTimeoutError(RuntimeError):
@@ -101,5 +129,41 @@ def check_session_is_valid(storage_state: dict[str, Any]) -> bool:
             page = context.new_page()
             page.goto(SESSION_CHECK_URL)
             return SESSION_CHECK_URL in page.url
+        finally:
+            browser.close()
+
+
+def fetch_search_results_page(
+    storage_state: dict[str, Any], location: str, keywords: str, page: int
+) -> list[str]:
+    """Verilen `storage_state`'i yeni, gorunmez (`headless=True`) bir
+    tarayici baglaminda yukleyip, (location, keywords) sorgusu icin
+    LinkedIn is arama sonuclarinin `page`.sayfasindaki (0-indexed) ham
+    ilan karti HTML'lerini doner.
+
+    Sayfalama SADECE `start` sorgu parametresiyle (0-indexed sayfa *
+    `_RESULTS_PER_PAGE`) ifade edilir - bu fonksiyon KENDI BASINA birden
+    fazla sayfa gezmez; cagiran (`collection/collector.py`) her sayfayi
+    ayri ayri ister ve ne zaman duracagina (bos sonuc veya FR-21 siniri)
+    kendisi karar verir.
+
+    Bos liste, bu sorgu icin `page`'de hicbir ilan karti bulunmadigi
+    anlamina gelir (sayfalamanin dogal sonu icin kullanilan sinyal).
+
+    Tarayici, basarili/basarisiz her durumda kapatilir (try/finally).
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            context = browser.new_context(storage_state=storage_state)
+            page_obj = context.new_page()
+            search_url = (
+                f"{SEARCH_URL}?keywords={quote_plus(keywords)}"
+                f"&location={quote_plus(location)}"
+                f"&start={page * _RESULTS_PER_PAGE}"
+            )
+            page_obj.goto(search_url)
+            cards = page_obj.locator(_JOB_CARD_SELECTOR)
+            return [cards.nth(i).inner_html() for i in range(cards.count())]
         finally:
             browser.close()

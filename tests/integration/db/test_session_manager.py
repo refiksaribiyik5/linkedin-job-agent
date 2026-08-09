@@ -71,13 +71,30 @@ def session_validity_checker():
 
 
 @pytest.fixture
+def search_page():
+    calls: list[tuple] = []
+    state = {"return_value": []}
+
+    def _search(storage_state: dict, location: str, keywords: str, page: int) -> list[str]:
+        calls.append((storage_state, location, keywords, page))
+        return state["return_value"]
+
+    _search.calls = calls
+    _search.state = state
+    return _search
+
+
+@pytest.fixture
 def session_manager(
     db_session: Session,
     secrets_provider: _FakeSecretsProvider,
     playwright_login,
     session_validity_checker,
+    search_page,
 ) -> SessionManager:
-    return SessionManager(db_session, secrets_provider, playwright_login, session_validity_checker)
+    return SessionManager(
+        db_session, secrets_provider, playwright_login, session_validity_checker, search_page
+    )
 
 
 def test_session_manager_implements_linkedin_port(session_manager: SessionManager):
@@ -164,6 +181,7 @@ def test_ensure_session_leaves_no_partial_state_when_login_fails(
     account: AccountOrm,
     secrets_provider: _FakeSecretsProvider,
     session_validity_checker,
+    search_page,
 ):
     # Ic-denetimde dogrulanmasi gereken bir davranis (kodun kendisi zaten
     # dogru sirayla yaziliyor, ama bu oncesinde otomatik bir test yoktu):
@@ -175,7 +193,9 @@ def test_ensure_session_leaves_no_partial_state_when_login_fails(
     def _failing_login():
         raise RuntimeError("kullanici 2FA'yi tamamlamadan vazgecti")
 
-    manager = SessionManager(db_session, secrets_provider, _failing_login, session_validity_checker)
+    manager = SessionManager(
+        db_session, secrets_provider, _failing_login, session_validity_checker, search_page
+    )
 
     with pytest.raises(RuntimeError, match="2FA"):
         manager.ensure_session(account.account_id)
@@ -190,6 +210,7 @@ def test_ensure_session_does_not_write_secret_if_db_write_fails(
     secrets_provider: _FakeSecretsProvider,
     playwright_login,
     session_validity_checker,
+    search_page,
     monkeypatch,
 ):
     # Bagimsiz incelemede bulunan Major bulgu: DB yazimi (flush) ile
@@ -203,7 +224,7 @@ def test_ensure_session_does_not_write_secret_if_db_write_fails(
     # basarisizligi secret yazimindan ONCE gerceklesir, hicbir yetim
     # secret asla olusmaz.
     manager = SessionManager(
-        db_session, secrets_provider, playwright_login, session_validity_checker
+        db_session, secrets_provider, playwright_login, session_validity_checker, search_page
     )
 
     # NOT: `session.get(...)` kendi ici SQLAlchemy autoflush'i tetikler -
@@ -233,6 +254,7 @@ def test_ensure_session_db_row_is_cleanly_rollback_recoverable_if_secret_write_f
     account: AccountOrm,
     playwright_login,
     session_validity_checker,
+    search_page,
 ):
     # Ayni bulgunun diger yarisi: DB yazimi ONCE gerceklestigi icin,
     # SONRASINDA secret yazimi basarisiz olursa (orn. disk dolu), cagiran
@@ -255,7 +277,11 @@ def test_ensure_session_db_row_is_cleanly_rollback_recoverable_if_secret_write_f
             raise RuntimeError("disk full")
 
     manager = SessionManager(
-        db_session, _FailingSecretsProvider(), playwright_login, session_validity_checker
+        db_session,
+        _FailingSecretsProvider(),
+        playwright_login,
+        session_validity_checker,
+        search_page,
     )
 
     with pytest.raises(RuntimeError, match="disk full"):
@@ -451,3 +477,144 @@ def test_validate_detects_manual_invalidation_of_a_previously_valid_session(
 
     row = db_session.get(LinkedInSessionOrm, account.account_id)
     assert row.session_status == SessionStatus.EXPIRED
+
+
+# ---------------------------------------------------------------------------
+# search_jobs_page (Roadmap M3.3, FR-21) - `LinkedInPort`'un yeni soyut
+# metodu: verilen (location, keywords, page) sorgusu icin, hesabin kalici
+# oturumunu kullanarak TEK bir sayfalik ham ilan karti dizisini doner.
+# `collection/collector.py`'nin (M3.3) `linkedin_port`'a bagimli olmasi
+# gerektigi kararinin (proje talimatiyla acikca onaylandi) somut karsiligi.
+# ---------------------------------------------------------------------------
+
+
+def test_search_jobs_page_raises_session_invalid_error_when_no_session_exists(
+    session_manager: SessionManager,
+    account: AccountOrm,
+    search_page,
+):
+    with pytest.raises(SessionInvalidError):
+        session_manager.search_jobs_page(account.account_id, "Istanbul", '"Sales"', 0)
+
+    assert search_page.calls == []
+
+
+def test_search_jobs_page_raises_session_invalid_error_when_ref_is_null(
+    db_session: Session,
+    account: AccountOrm,
+    session_manager: SessionManager,
+    search_page,
+):
+    db_session.add(
+        LinkedInSessionOrm(
+            account_id=account.account_id,
+            encrypted_storage_state_ref=None,
+            session_status=SessionStatus.UNKNOWN,
+            last_validated_at=None,
+        )
+    )
+    db_session.flush()
+
+    with pytest.raises(SessionInvalidError):
+        session_manager.search_jobs_page(account.account_id, "Istanbul", '"Sales"', 0)
+
+    assert search_page.calls == []
+
+
+def test_search_jobs_page_raises_session_invalid_error_when_session_marked_expired(
+    db_session: Session,
+    account: AccountOrm,
+    session_manager: SessionManager,
+    secrets_provider: _FakeSecretsProvider,
+    search_page,
+):
+    # Bagimsiz incelemede bulunan bulgu: bir onceki validate() (M3.2)
+    # cagrisi bu oturumu ZATEN EXPIRED olarak isaretlemis olabilir (bkz.
+    # SessionManager.validate()). search_jobs_page() yalnizca referansin
+    # VAR olup olmadigina bakip session_status'u yok sayarsa, ARTIK
+    # GECERSIZ oldugu BILINEN bir oturumla gereksiz yere LinkedIn'e
+    # istek atmaya calisir - bu, "session consistency" acisindan gercek
+    # bir tutarsizliktir: DB'nin kendi durumu yok sayilir.
+    secrets_provider.set("linkedin_storage_state:existing", json.dumps(FAKE_STORAGE_STATE))
+    db_session.add(
+        LinkedInSessionOrm(
+            account_id=account.account_id,
+            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            session_status=SessionStatus.EXPIRED,
+            last_validated_at=datetime.now(UTC),
+        )
+    )
+    db_session.flush()
+
+    with pytest.raises(SessionInvalidError):
+        session_manager.search_jobs_page(account.account_id, "Istanbul", '"Sales"', 0)
+
+    assert search_page.calls == []
+
+
+def test_search_jobs_page_raises_session_invalid_error_when_secret_missing_for_ref(
+    db_session: Session,
+    account: AccountOrm,
+    session_manager: SessionManager,
+    search_page,
+):
+    db_session.add(
+        LinkedInSessionOrm(
+            account_id=account.account_id,
+            encrypted_storage_state_ref="linkedin_storage_state:missing",
+            session_status=SessionStatus.VALID,
+            last_validated_at=datetime.now(UTC),
+        )
+    )
+    db_session.flush()
+
+    with pytest.raises(SessionInvalidError):
+        session_manager.search_jobs_page(account.account_id, "Istanbul", '"Sales"', 0)
+
+    assert search_page.calls == []
+
+
+def test_search_jobs_page_delegates_to_injected_callable_with_stored_storage_state(
+    db_session: Session,
+    account: AccountOrm,
+    session_manager: SessionManager,
+    secrets_provider: _FakeSecretsProvider,
+    search_page,
+):
+    secrets_provider.set("linkedin_storage_state:existing", json.dumps(FAKE_STORAGE_STATE))
+    db_session.add(
+        LinkedInSessionOrm(
+            account_id=account.account_id,
+            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            session_status=SessionStatus.VALID,
+            last_validated_at=datetime.now(UTC),
+        )
+    )
+    db_session.flush()
+    search_page.state["return_value"] = ["<div>card</div>"]
+
+    result = session_manager.search_jobs_page(account.account_id, "Istanbul", '"Sales"', 2)
+
+    assert result == ["<div>card</div>"]
+    assert search_page.calls == [(FAKE_STORAGE_STATE, "Istanbul", '"Sales"', 2)]
+
+
+def test_search_jobs_page_returns_empty_list_when_callable_returns_empty(
+    db_session: Session,
+    account: AccountOrm,
+    session_manager: SessionManager,
+    secrets_provider: _FakeSecretsProvider,
+    search_page,
+):
+    secrets_provider.set("linkedin_storage_state:existing", json.dumps(FAKE_STORAGE_STATE))
+    db_session.add(
+        LinkedInSessionOrm(
+            account_id=account.account_id,
+            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            session_status=SessionStatus.VALID,
+            last_validated_at=datetime.now(UTC),
+        )
+    )
+    db_session.flush()
+
+    assert session_manager.search_jobs_page(account.account_id, "Istanbul", '"Sales"', 0) == []

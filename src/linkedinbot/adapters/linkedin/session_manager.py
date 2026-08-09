@@ -1,9 +1,10 @@
 """SessionManager - `linkedin_port`'un implementasyonu (Roadmap M3.1: login
-+ kaydetme; Roadmap M3.2: oturum dogrulama).
++ kaydetme; Roadmap M3.2: oturum dogrulama; Roadmap M3.3: arama sayfasi
+getirme).
 
 TDD Section 9: "SessionManager - `linkedin_port`'un bir parcasi; Playwright'in
 `storage_state` (cerezler + local storage) mekanizmasiyla kalici oturumu
-yukler/dogrular." Bu sinif o tanimin iki asamada teslim edilen kismini
+yukler/dogrular." Bu sinif o tanimin ucu asamada teslim edilen kismini
 karsilar:
 
 - `ensure_session()` (M3.1): verilen hesap icin DB'de (`linkedin_sessions`)
@@ -17,6 +18,14 @@ karsilar:
   firlatilir; `session_status`/`last_validated_at` DB alanlari (TDD
   Section 15'in tam da bu amacla tanimladigi kolonlar) sonuca gore
   guncellenir.
+- `search_jobs_page()` (M3.3, FR-21): kayitli `storage_state`'i
+  `playwright_client.fetch_search_results_page`'e (yine enjekte edilen
+  bir callable olarak) vererek TEK bir sayfalik ham ilan karti HTML'sini
+  getirir. Sayfalama/limit MANTIGI burada YOKTUR - bu, `collection/collector.py`'nin
+  (PaginationController) sorumlulugudur; bu metod yalnizca "kalici oturumu
+  bul, secret'i coz, tek sayfa getir" orkestrasyonunu yapar - `ensure_session()`/
+  `validate()` ile AYNI "oturum yoksa/referans kirikca SessionInvalidError"
+  guvenlik agini paylasir.
 
 DB semasinin kendi belgeledigi gibi (bkz. db/models.py
 `LinkedInSessionOrm.encrypted_storage_state_ref`), bu tabloya yazilan
@@ -56,11 +65,13 @@ class SessionManager(LinkedInPort):
         secrets_provider: SecretsProviderPort,
         playwright_login: Callable[[], dict[str, Any]],
         session_validity_checker: Callable[[dict[str, Any]], bool],
+        search_page: Callable[[dict[str, Any], str, str, int], list[str]],
     ) -> None:
         self._session = session
         self._secrets_provider = secrets_provider
         self._playwright_login = playwright_login
         self._session_validity_checker = session_validity_checker
+        self._search_page = search_page
 
     def ensure_session(self, account_id: UUID) -> None:
         existing = self._session.get(LinkedInSessionOrm, account_id)
@@ -142,3 +153,45 @@ class SessionManager(LinkedInPort):
             "degil (LinkedIn oturumu kabul etmedi) - interaktif giris akisi "
             "(ensure_session, Roadmap M3.1) yeniden calistirilmalidir."
         )
+
+    def search_jobs_page(
+        self, account_id: UUID, location: str, keywords: str, page: int
+    ) -> list[str]:
+        # NOT: `validate()`'in "oturum yok/referans kirik" guvenlik agiyla
+        # KASITLI OLARAK ayni sekilde tekrarlanir (bkz. modul dokumaninin
+        # M3.3 notu) - `search_jobs_page()`'in kendi cagirani (PRD Workflow
+        # adim 2->3 geregi Session Validation'dan SONRA calisan Collection)
+        # `validate()`'i onceden cagirmis olsa BILE, bu metod kendi
+        # basina guvenli olmalidir (orn. dogrudan/izole cagrilan bir
+        # test veya gelecekteki bir hata durumu icin).
+        existing = self._session.get(LinkedInSessionOrm, account_id)
+        if existing is None or existing.encrypted_storage_state_ref is None:
+            raise SessionInvalidError(
+                f"Hesap {account_id} icin kalici bir LinkedIn oturumu bulunamadi - "
+                "once interaktif giris akisi (ensure_session, Roadmap M3.1) "
+                "calistirilmalidir."
+            )
+
+        # Bagimsiz incelemede bulunan bulgu: yalnizca referansin VAR
+        # olmasina bakmak yeterli degildir - `validate()` (M3.2) bu
+        # oturumu ONCEDEN EXPIRED olarak isaretlemis olabilir. Bu kontrol
+        # olmadan, ARTIK GECERSIZ oldugu ZATEN BILINEN bir oturumla
+        # gereksiz yere LinkedIn'e istek atilmis olurdu (session
+        # consistency ihlali) - DB'nin kendi durumu yok sayilmamalidir.
+        if existing.session_status == SessionStatus.EXPIRED:
+            raise SessionInvalidError(
+                f"Hesap {account_id} icin kayitli LinkedIn oturumu gecersiz "
+                "olarak isaretli (session_status=EXPIRED) - interaktif giris "
+                "akisi (ensure_session, Roadmap M3.1) yeniden calistirilmalidir."
+            )
+
+        stored = self._secrets_provider.get(existing.encrypted_storage_state_ref)
+        if stored is None:
+            raise SessionInvalidError(
+                f"Hesap {account_id} icin DB'de bir oturum referansi var "
+                f"({existing.encrypted_storage_state_ref}), ama Secrets Provider'da "
+                "karsilik gelen bir deger bulunamadi."
+            )
+
+        storage_state = json.loads(stored)
+        return self._search_page(storage_state, location, keywords, page)

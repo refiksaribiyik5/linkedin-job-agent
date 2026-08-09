@@ -24,6 +24,19 @@ sinifi) henuz insa edilmemistir (Roadmap M9.3, "Hata Siniflandirma +
 Retry"); bu yuzden `SessionInvalidError` simdilik bagimsiz, kendi
 basina bir exception olarak tanimlanir, var olmayan bir taksonomi
 sinifindan miras almaz.
+
+M3.3 KAPSAMI (Roadmap "Arama & Sayfalama", FR-21): Port'a
+`search_jobs_page()` eklenir - verilen bir (location, keywords, page)
+sorgusu icin TEK bir sayfalik ham ilan karti HTML'lerini doner. Bu
+metodun Port'a (adapters.linkedin'e degil, dogrudan Playwright'a da
+degil) eklenmesi KASITLI bir mimari karardir (proje talimatiyla acikca
+onaylandi): TDD Section 6'nin modul sorumluluklari tablosu, `collection`
+modulunun BAGIMLI OLDUGU Port'u acikca `linkedin_port` olarak listeler -
+`collection/collector.py` (Roadmap M3.3) bu yuzden Playwright'i HICBIR
+ZAMAN dogrudan import etmez, yalnizca bu Port'a bagimlidir. Sayfalama
+MANTIGI (kac sayfa gidilecegi, FR-21'in ust siniri, `collection_capped`
+bayragi) BURADA DEGIL, `collection/collector.py`'de yasar - bu metod
+yalnizca TEK bir sayfa getirir, ne zaman durulacagina karar vermez.
 """
 
 from __future__ import annotations
@@ -62,4 +75,17 @@ class LinkedInPort(ABC):
         dolmus veya hic var olmayan bir oturum sessizce yutulmaz -
         `SessionInvalidError` firlatilir (FR-1). Gecerliyse hicbir sey
         firlatmadan doner.
+        """
+
+    @abstractmethod
+    def search_jobs_page(
+        self, account_id: UUID, location: str, keywords: str, page: int
+    ) -> list[str]:
+        """Verilen hesabin kalici oturumunu kullanarak, (location, keywords)
+        sorgusu icin LinkedIn is arama sonuclarinin `page`.sayfasindaki
+        (0-indexed) ham ilan karti HTML'lerini doner. Bos liste, o sorgu
+        icin baska sayfa olmadigi (sayfalamanin dogal sonu) anlamina
+        gelir. Kalici bir oturum yoksa/gecersizse `SessionInvalidError`
+        firlatilir - Collection (bu metod), pipeline'da Session
+        Validation'dan (M3.2) SONRA calisir (PRD Workflow adim 2->3).
         """

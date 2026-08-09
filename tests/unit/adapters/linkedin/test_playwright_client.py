@@ -18,11 +18,32 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from linkedinbot.adapters.linkedin import playwright_client as module_under_test
 from linkedinbot.adapters.linkedin.playwright_client import (
     LOGIN_URL,
+    SEARCH_URL,
     SESSION_CHECK_URL,
     LoginTimeoutError,
     check_session_is_valid,
+    fetch_search_results_page,
     perform_interactive_login,
 )
+
+
+class _FakeCardElement:
+    def __init__(self, html: str):
+        self._html = html
+
+    def inner_html(self) -> str:
+        return self._html
+
+
+class _FakeCardLocator:
+    def __init__(self, card_html_list: list[str]):
+        self._cards = card_html_list
+
+    def count(self) -> int:
+        return len(self._cards)
+
+    def nth(self, index: int) -> _FakeCardElement:
+        return _FakeCardElement(self._cards[index])
 
 
 class _FakePage:
@@ -31,12 +52,15 @@ class _FakePage:
         raise_on_wait: Exception | None = None,
         landing_url: str | None = None,
         raise_on_goto: Exception | None = None,
+        job_cards: list[str] | None = None,
     ):
         self.goto_calls: list[str] = []
         self.wait_for_url_calls: list[tuple[str, int]] = []
+        self.locator_calls: list[str] = []
         self._raise_on_wait = raise_on_wait
         self._landing_url = landing_url
         self._raise_on_goto = raise_on_goto
+        self._job_cards = job_cards if job_cards is not None else []
         self.url = ""
 
     def goto(self, url: str) -> None:
@@ -49,6 +73,10 @@ class _FakePage:
         self.wait_for_url_calls.append((pattern, timeout))
         if self._raise_on_wait is not None:
             raise self._raise_on_wait
+
+    def locator(self, selector: str) -> _FakeCardLocator:
+        self.locator_calls.append(selector)
+        return _FakeCardLocator(self._job_cards)
 
 
 class _FakeContext:
@@ -98,9 +126,13 @@ def _install_fake_playwright(
     raise_on_wait: Exception | None = None,
     landing_url: str | None = None,
     raise_on_goto: Exception | None = None,
+    job_cards: list[str] | None = None,
 ):
     page = _FakePage(
-        raise_on_wait=raise_on_wait, landing_url=landing_url, raise_on_goto=raise_on_goto
+        raise_on_wait=raise_on_wait,
+        landing_url=landing_url,
+        raise_on_goto=raise_on_goto,
+        job_cards=job_cards,
     )
     context = _FakeContext(page)
     browser = _FakeBrowser(context)
@@ -291,3 +323,88 @@ def test_check_session_is_valid_does_not_reclassify_navigation_errors(monkeypatc
 
     with pytest.raises(RuntimeError, match="simulated network failure"):
         check_session_is_valid(FAKE_STORED_STATE)
+
+
+# ---------------------------------------------------------------------------
+# fetch_search_results_page (Roadmap M3.3) - kalici bir storage_state'i
+# yukleyip, verilen (location, keywords) sorgusu icin belirtilen sayfadaki
+# ham ilan karti HTML'lerini doner. Sayfalama (hangi sayfaya kadar
+# devam edilecegi, FR-21 sinirinin nerede uygulanacagi) burada YOKTUR -
+# bu, collection/collector.py'nin (PaginationController) sorumlulugudur;
+# bu fonksiyon yalnizca TEK bir sayfayi getirir.
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_search_results_page_launches_headless_browser(monkeypatch):
+    # Toplama otomatik/gozetimsiz calisir (ASM-8) - M3.1'in interaktif
+    # girisinin aksine burada insan mudahalesi beklenmez.
+    _page, _context, _browser, chromium = _install_fake_playwright(monkeypatch, job_cards=[])
+
+    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+
+    assert chromium.launch_kwargs == {"headless": True}
+
+
+def test_fetch_search_results_page_loads_the_given_storage_state(monkeypatch):
+    _page, _context, browser, _chromium = _install_fake_playwright(monkeypatch, job_cards=[])
+
+    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+
+    assert browser.new_context_kwargs == {"storage_state": FAKE_STORED_STATE}
+
+
+def test_fetch_search_results_page_navigates_to_search_url_with_query_params(monkeypatch):
+    page, _context, _browser, _chromium = _install_fake_playwright(monkeypatch, job_cards=[])
+
+    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales" OR "Key Account"', 2)
+
+    assert len(page.goto_calls) == 1
+    url = page.goto_calls[0]
+    assert url.startswith(SEARCH_URL)
+    assert "location=Istanbul" in url
+    assert "keywords=%22Sales%22+OR+%22Key+Account%22" in url
+    # 2. sayfa (0-indexed), varsayilan sayfa boyutunun 2 katinda baslamali.
+    assert "start=50" in url
+
+
+def test_fetch_search_results_page_first_page_starts_at_zero(monkeypatch):
+    page, _context, _browser, _chromium = _install_fake_playwright(monkeypatch, job_cards=[])
+
+    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+
+    assert "start=0" in page.goto_calls[0]
+
+
+def test_fetch_search_results_page_returns_raw_card_html(monkeypatch):
+    cards = ["<div>Card One</div>", "<div>Card Two</div>"]
+    _page, _context, _browser, _chromium = _install_fake_playwright(monkeypatch, job_cards=cards)
+
+    result = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+
+    assert result == cards
+
+
+def test_fetch_search_results_page_returns_empty_list_when_no_cards_found(monkeypatch):
+    # Bos liste = bu sorgu icin sayfalamanin dogal sonu (bkz. collector.py).
+    _page, _context, _browser, _chromium = _install_fake_playwright(monkeypatch, job_cards=[])
+
+    assert fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0) == []
+
+
+def test_fetch_search_results_page_closes_browser_after_fetch(monkeypatch):
+    _page, _context, browser, _chromium = _install_fake_playwright(monkeypatch, job_cards=[])
+
+    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+
+    assert browser.closed is True
+
+
+def test_fetch_search_results_page_closes_browser_even_if_navigation_fails(monkeypatch):
+    _page, _context, browser, _chromium = _install_fake_playwright(
+        monkeypatch, raise_on_goto=RuntimeError("simulated network failure")
+    )
+
+    with pytest.raises(RuntimeError, match="simulated network failure"):
+        fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+
+    assert browser.closed is True
