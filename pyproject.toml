@@ -41,7 +41,10 @@ authors = [{ name = "Refik Saribiyik" }]
 # onaylandi, yalnizca bu tek amac icin eklendi. Ek bir ayristirici backend
 # (orn. lxml) KASITLI OLARAK eklenmedi - Python'in kendi yerlesik
 # `html.parser`i BeautifulSoup icin yeterlidir (talimat: "yalnizca
-# RecordExtractor icin gereken minimum bagimlilik").
+# RecordExtractor icin gereken minimum bagimlilik"). anthropic (M5.1),
+# TDD Section 2'nin "LLM Saglayici" secimi - `LLMProviderPort`'un temel
+# implementasyonu icin resmi Python SDK'si; SDK'nin kendi "tool use"
+# mekanizmasi, yapilandirilmis (semaya uygun) cikti almak icin kullanilir.
 dependencies = [
     "pydantic==2.13.4",
     "sqlalchemy==2.0.51",
@@ -52,6 +55,7 @@ dependencies = [
     "keyring==25.7.0",
     "playwright==1.62.0",
     "beautifulsoup4==4.15.0",
+    "anthropic==0.121.0",
 ]
 
 # M1.4: `linkedinbot seed` komutunu (bkz. cli.py) dogrudan calistirilabilir
