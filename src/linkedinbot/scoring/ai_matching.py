@@ -1,5 +1,5 @@
-"""AI Match Scoring - PRD Section 13, FR-7, FR-18, RISK-10, TDD Section 10
-(Roadmap M7.2).
+"""AI Match Scoring - PRD Section 13, FR-7, FR-16, FR-18, RISK-10, TDD
+Section 10 (Roadmap M7.2, M7.3).
 
 **"LLM sinyal cikarir, kod skoru hesaplar":** Section 13.1'in 5 bileseni
 icin LLM'den DOGRUDAN "0-100 nihai skor" istenmez. Dort bilesenin sinyali
@@ -60,6 +60,34 @@ oldugu icin `EvaluatedJob`'un kendisi yeniden kullanilmaz, M7.1'in
 Config Version` uclusu. Bu modul SAF'tir (M7.1'in `score_cache.py`
 deseniyle AYNI): hicbir depoya erismez, cagiran "onbellek" dict'ini
 acikca verir ve gunceller.
+
+**Borderline Bucket (FR-16, EDGE-11, Roadmap M7.3):** Roadmap M7.3'un
+"Amaç"i acikca "FR-16'nin bant genisligi mantigini FILTRELEME ve AI
+MATCH SCORE ARASINDA tek bir is_borderline bayraginda birlestirmek"
+der - iki AYRI bant-genisligi hesaplamasi (M6.5'in Department-guveni
+tabanli filtreleme borderline'i, VE burada eklenen AI Match Score
+tabanli borderline) TEK bir OR birlesimiyle birlestirilir. Bu yuzden
+`compute_is_borderline()`, M6.5'in `PipelineResult`'ini (string-anahtarli
+bir dict tasiyan bir tip) ICE AKTARMAZ - `score_ai_match()`'in kendi
+tasarim karariyla AYNI gerekceyle: cagiran, M6.5'in ciktisindan
+`is_borderline` degerini cikarip DUZ bir bool olarak verir.
+
+FR-16: "Borderline bant genisligi varsayilan olarak esik degerinin 5
+puan ALTI olarak tanimlanir (orn. esik 60 ise 55-60 arasi)... bant
+yalnizca esigin ALTINA dogru tanimlidir." Bu yuzden bant `[esik -
+genislik, esik)` araligidir (ALT sinir DAHIL, esigin KENDISI HARIC -
+esigin kendisi zaten `score_ai_match()`'in "Company"/"Department"
+esiklerindeki AYNI ">= esik -> pass" kuraliyla Pass sayilir, M7.3'un
+kendi Tamamlanma Dogrulamasi'nin "esik 60 ... skor 60 ... Pass"
+ornegiyle birebir tutarlidir); bandin ALTINDA kalan bir skor (orn.
+esik 60, bant 5 iken skor 54) borderline DEGIL, kesin bir red'dir.
+
+`ai_match_score` "Scoring Unavailable" (None) ise, AI Match Score
+tabanli borderline kontrolu uygulanamaz (karsilastirilacak bir sayi
+yoktur) - ancak `filtering_is_borderline=True` ise genel sonuc yine de
+`True`'dur (iki kaynaktan HERHANGI biri yeterlidir, TDD Section 10'un
+"asla uydurma bir skor uretme" ilkesini ihlal etmeden - burada bir skor
+UYDURULMAZ, yalnizca ONCEDEN VAR OLAN bir bayrak tasinir).
 """
 
 from __future__ import annotations
@@ -232,3 +260,18 @@ def score_ai_match(
         match_rationale=rationale.items,
         evaluated_at=evaluated_at,
     )
+
+
+def compute_is_borderline(
+    ai_match_score: float | None,
+    ai_match_score_threshold: float,
+    borderline_band_width: float,
+    *,
+    filtering_is_borderline: bool,
+) -> bool:
+    if filtering_is_borderline:
+        return True
+    if ai_match_score is None:
+        return False
+    band_floor = ai_match_score_threshold - borderline_band_width
+    return band_floor <= ai_match_score < ai_match_score_threshold

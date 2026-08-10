@@ -32,6 +32,7 @@ from linkedinbot.scoring.ai_matching import (
     AIMatchRationaleInference,
     AIMatchResult,
     CareerGoalAlignmentInference,
+    compute_is_borderline,
     score_ai_match,
 )
 from linkedinbot.scoring.company_scoring import CompanyScore
@@ -377,3 +378,58 @@ def test_result_type_alone_carries_the_given_cache_key_components():
     assert result.account_id == account_id
     assert result.config_version == 7
     assert result.evaluated_at == EVALUATED_AT
+
+
+# ---------------------------------------------------------------------------
+# compute_is_borderline (Roadmap M7.3, FR-16, EDGE-11)
+#
+# Roadmap M7.3 "Tamamlanma Dogrulamasi": "60 esik / 5 bant konfigurasyonuna
+# karsi 58, 60, 65 skorlarinin sirasiyla Borderline/Pass/Pass olarak
+# siniflandigi dogrulanir."
+# ---------------------------------------------------------------------------
+
+
+def test_score_within_band_below_threshold_is_borderline():
+    # EDGE-11: esik 60 iken skor 58 -> Borderline (elenmez).
+    assert compute_is_borderline(58.0, 60.0, 5.0, filtering_is_borderline=False) is True
+
+
+def test_score_exactly_at_threshold_is_not_borderline():
+    # FR-16: bant yalnizca esigin ALTINA dogru tanimlidir - esigin
+    # KENDISI zaten Pass'tir (bkz. M6.4/M7.2'nin kendi ">= esik -> pass"
+    # kurali), Borderline degil.
+    assert compute_is_borderline(60.0, 60.0, 5.0, filtering_is_borderline=False) is False
+
+
+def test_score_above_threshold_is_not_borderline():
+    assert compute_is_borderline(65.0, 60.0, 5.0, filtering_is_borderline=False) is False
+
+
+def test_score_below_the_band_is_not_borderline():
+    # FR-16: bant yalnizca esigin 5 puan altina kadar tanimlidir - 54,
+    # bandin (55-60) DISINDADIR, kesin bir red'dir, Borderline degil.
+    assert compute_is_borderline(54.0, 60.0, 5.0, filtering_is_borderline=False) is False
+
+
+def test_score_at_the_exact_bottom_of_the_band_is_borderline():
+    # Bant [esik - genislik, esik) = [55, 60) - alt sinir DAHIL.
+    assert compute_is_borderline(55.0, 60.0, 5.0, filtering_is_borderline=False) is True
+
+
+def test_unavailable_ai_match_score_is_not_borderline_via_score_alone():
+    assert compute_is_borderline(None, 60.0, 5.0, filtering_is_borderline=False) is False
+
+
+def test_filtering_borderline_forces_overall_borderline_even_with_a_clear_pass_score():
+    # Roadmap'in "Amac"i: filtreleme VE AI Match Score arasindaki bant
+    # mantigi TEK bir bayrakta BIRLESTIRILIR - ya biri ya digeri borderline
+    # ise, genel sonuc borderline'dir.
+    assert compute_is_borderline(90.0, 60.0, 5.0, filtering_is_borderline=True) is True
+
+
+def test_filtering_borderline_combined_with_unavailable_score_is_still_borderline():
+    assert compute_is_borderline(None, 60.0, 5.0, filtering_is_borderline=True) is True
+
+
+def test_neither_filtering_nor_score_borderline_results_in_false():
+    assert compute_is_borderline(90.0, 60.0, 5.0, filtering_is_borderline=False) is False
