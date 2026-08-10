@@ -17,20 +17,38 @@ kablolayan (gelecekteki M9.2 Orchestrator) katmanin sorumlulugudur -
 NFR-6/Config-Is Mantigi Ayrimi ile tutarlidir ve `tmp_path` ile gercek bir
 "reports/" dizinine dokunmadan tam izolasyonlu test saglar.
 
-Atomik yazma (gecici dosya + `os.replace()`): `adapters/secrets/
-local_keyring_adapter.py`'nin `_write_all()` metoduyla AYNI desen ve AYNI
-gerekce (NFR-13 "ya butunuyle uygulanir ya da hic uygulanmaz") - duz
+Atomik yazma + atomik "exclusive create" (istisnai duzeltme, bkz.
+"Duzeltme notu" asagida): `adapters/secrets/local_keyring_adapter.py`'nin
+`_write_all()` metoduyla AYNI "gecici dosya + icerik butunlugu" deseni
+korunur (NFR-13 "ya butunuyle uygulanir ya da hic uygulanmaz" - duz
 `write_text()` kesinti/cokme durumunda yarim/bozuk bir rapor dosyasi
-birakabilir.
+birakabilir), ANCAK son "yayinlama" adimi `os.replace()` DEGIL,
+`os.link()`'tir - asagidaki duzeltme notuna bakiniz.
 
-FR-17 "uzerine yazma yok" - neden AKTIF bir kontrol (yalnizca bir varsayim
-degil): hedef dosya zaten varsa `save()` `FileExistsError` firlatir.
-`report_id` her cagirida taze bir UUID oldugundan bu kontrol normal
-kullanimda pratikte tetiklenmez, ama FR-17'yi Port'un kendi sozlesmesi
-geregi DENETLENEBILIR bir degismez (invariant) olarak kodlar - ayni
-projenin baska yerlerde (orn. EDGE-15 config dogrulama, M8.2'nin eksik
-lookup'larda YUKSEK SESLE basarisiz olmasi) izledigi "asla sessizce
-varsayilan/mevcut davranisa donme" ilkesiyle tutarlidir.
+FR-17 "uzerine yazma yok" - neden AKTIF, ATOMIK bir kontrol (yalnizca bir
+varsayim degil): hedef konum zaten doluysa `save()` `FileExistsError`
+firlatir. Bu, Port'un kendi sozlesmesi geregi DENETLENEBILIR bir
+degismez (invariant) olarak kodlanir - ayni projenin baska yerlerde
+(orn. EDGE-15 config dogrulama, M8.2'nin eksik lookup'larda YUKSEK
+SESLE basarisiz olmasi) izledigi "asla sessizce varsayilan/mevcut
+davranisa donme" ilkesiyle tutarlidir.
+
+**Duzeltme notu (independent review bulgusu):** Ilk uygulama, bu kontrolu
+ayri bir `target_path.exists()` on-kontrolu (sonrasinda kosulsuz
+uzerine yazan `os.replace()`) ile yapiyordu - bu IKI ayri islem arasinda
+bir TOCTOU penceresi birakiyordu: es zamanli iki `save()` cagirisi AYNI
+(account_id, report_id, generated_at) uclusuyle, ikisi de on-kontrolu
+"dosya yok" olarak gecebilir ve biri digerinin icerigini SESSIZCE
+(hicbir hata firlatilmadan) ezebilirdi - bu, `ReportStorePort.save()`'in
+kendi sozlesmesinin ("hicbir zaman sessizce mevcut bir raporun uzerine
+yazmaz") ve FR-17'nin dogrudan ihlaliydi; bu ihlal thread'lerle SOMUT
+olarak yeniden uretildi ve `os.link()`'e gecilerek DUZELTILDI: `os.link()`
+hedef zaten varsa TEK, ATOMIK bir sistem cagrisi (`link(2)`) icinde
+`FileExistsError` firlatir ve hedefin icerigine HIC DOKUNMAZ - ayri bir
+on-kontrole gerek kalmaz, dolayisiyla TOCTOU penceresi TAMAMEN ortadan
+kalkar. Gecici dosya, ya basariyla yayinlandiktan (artik hedefle ayni
+inode'u paylasan fazladan bir sabit baglanti) ya da `os.link()`
+basarisiz oldugundan sonra HER durumda temizlenir.
 """
 
 from __future__ import annotations
@@ -52,19 +70,19 @@ class FilesystemReportStore(ReportStorePort):
         target_dir = self._base_dir / str(account_id)
         target_path = target_dir / f"{generated_at:%Y-%m-%d}_{report_id}.md"
 
-        if target_path.exists():
-            raise FileExistsError(
-                f"Report already exists at {target_path} - reports are never "
-                "overwritten (FR-17)."
-            )
-
         target_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp_path_str = tempfile.mkstemp(dir=target_dir, prefix=".report-", suffix=".tmp")
+        tmp_path = Path(tmp_path_str)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
                 tmp_file.write(content)
-            os.replace(tmp_path_str, target_path)
-        except BaseException:
-            Path(tmp_path_str).unlink(missing_ok=True)
-            raise
+            try:
+                os.link(tmp_path, target_path)
+            except FileExistsError:
+                raise FileExistsError(
+                    f"Report already exists at {target_path} - reports are never "
+                    "overwritten (FR-17)."
+                ) from None
+        finally:
+            tmp_path.unlink(missing_ok=True)
         return target_path

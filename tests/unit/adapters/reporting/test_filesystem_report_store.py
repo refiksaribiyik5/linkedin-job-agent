@@ -87,6 +87,40 @@ def test_save_never_overwrites_an_existing_report(tmp_path: Path):
     assert expected_path.read_text(encoding="utf-8") == "original content"
 
 
+def test_save_does_not_overwrite_even_when_the_existence_check_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Regresyon testi (independent review bulgusu): onceki uygulama
+    # `target_path.exists()` (ucuz, atomik OLMAYAN bir on-kontrol) ile
+    # `os.replace()` (atomik ama KOSULSUZ uzerine yazan) arasinda bir
+    # TOCTOU penceresi tasiyordu - iki es zamanli `save()` cagirisi AYNI
+    # (account_id, report_id, generated_at) uclusuyle, ikisi de
+    # `.exists()` kontrolunu "dosya yok" olarak gecip, biri digerinin
+    # icerigini SESSIZCE (hata firlatmadan) ezebiliyordu - bu, thread'lerle
+    # somut olarak yeniden uretildi (ayrintili rapor: independent review).
+    #
+    # Bu test, gercek threading yerine DETERMINISTIK bir sekilde AYNI kok
+    # nedeni hedefler: `Path.exists()`'i HER ZAMAN False donecek sekilde
+    # monkeypatch'leyerek, "on-kontrolun YALAN soyledigi" (bir baska
+    # yazicinin dosyayi TAM O SIRADA olusturdugu) senaryoyu simule eder.
+    # Dogru duzeltme (isletim sistemi duzeyinde atomik, kontrol GEREKTIRMEYEN
+    # "exclusive create" - orn. `os.link`), bu on-kontrole HIC guvenmedigi
+    # icin bu testte de FileExistsError firlatmaya devam etmeli VE mevcut
+    # dosyanin icerigini KORUMALIDIR.
+    account_id = uuid4()
+    report_id = uuid4()
+    store = FilesystemReportStore(base_dir=tmp_path)
+    store.save(account_id, report_id, GENERATED_AT, "original content")
+
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+
+    with pytest.raises(FileExistsError):
+        store.save(account_id, report_id, GENERATED_AT, "different content")
+
+    expected_path = tmp_path / str(account_id) / f"2026-08-10_{report_id}.md"
+    assert expected_path.read_text(encoding="utf-8") == "original content"
+
+
 def test_two_different_report_ids_produce_two_different_files(tmp_path: Path):
     account_id = uuid4()
     store = FilesystemReportStore(base_dir=tmp_path)
