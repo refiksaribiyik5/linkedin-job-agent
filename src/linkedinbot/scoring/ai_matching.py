@@ -127,7 +127,7 @@ def _weighted_ai_match_score(
     company_quality_score: float | None,
     career_goal_alignment_score: float,
     weights: AIMatchWeights,
-) -> float:
+) -> float | None:
     components = [
         (department_relevance_confidence * 100.0, weights.department_role_relevance),
         (100.0 if experience_level_fit else 0.0, weights.experience_level_fit),
@@ -138,6 +138,10 @@ def _weighted_ai_match_score(
         components.append((company_quality_score, weights.company_quality_contribution))
 
     total_weight = sum(weight for _, weight in components)
+    if total_weight == 0.0:
+        # M7.1's _weighted_score() ile ayni koruma: butun agirlik Unrated
+        # olarak haric tutulan tek bilesen uzerindeyse, bir skor UYDURULMAZ.
+        return None
     weighted_total = sum(value * weight for value, weight in components)
     return weighted_total / total_weight
 
@@ -190,6 +194,8 @@ def score_ai_match(
         alignment.score,
         weights,
     )
+    if ai_match_score is None:
+        return _unavailable()
 
     rationale = llm_gateway.generate(
         "ai_match_rationale",

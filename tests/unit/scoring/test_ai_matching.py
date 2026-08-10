@@ -154,6 +154,37 @@ def test_company_quality_unrated_excludes_and_renormalizes_remaining_components(
     assert result.ai_match_score == (31.5 + 15 + 10 + 12) / 0.75
 
 
+def test_all_weight_on_unrated_company_component_yields_scoring_unavailable_not_a_crash():
+    # Review bulgusu (Major): butun agirlik company_quality_contribution
+    # uzerinde (1.0) ve diger dort bileken 0.0 iken - bu, tek basina
+    # GECERLI bir AIMatchWeights'tir (toplam 1.0, config/validator.py'nin
+    # "yuzde 100'e toplanir" kontrolunden gecer) - VE sirket Unrated ise,
+    # etkin payda (renormalizasyon sonrasi kalan agirlik toplami) SIFIRA
+    # duser. M7.1'in `_weighted_score()`'unun AYNI durumda (`rated_weight_sum
+    # == 0.0`) yaptigi gibi, bir ZeroDivisionError yerine "Scoring
+    # Unavailable" (None) donmelidir - bir sayi UYDURULMAMALIDIR.
+    all_weight_on_company = AIMatchWeights(
+        department_role_relevance=0.0,
+        experience_level_fit=0.0,
+        location_fit=0.0,
+        company_quality_contribution=1.0,
+        career_goal_alignment=0.0,
+    )
+    llm_gateway = _FakeLLMGateway(
+        alignment_result=CareerGoalAlignmentInference(score=0.8, explanation="Good fit."),
+        rationale_result=_VALID_RATIONALE,
+    )
+
+    result = _score(
+        llm_gateway,
+        weights=all_weight_on_company,
+        company_score=_company_score(score_total=None),
+    )
+
+    assert result.ai_match_score is None
+    assert result.match_rationale is None
+
+
 def test_result_carries_at_least_three_grounded_rationale_items():
     llm_gateway = _FakeLLMGateway(
         alignment_result=CareerGoalAlignmentInference(score=0.8, explanation="Good fit."),
