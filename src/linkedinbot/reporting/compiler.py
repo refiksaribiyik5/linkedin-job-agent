@@ -193,11 +193,7 @@ def _summary_line(evaluated_jobs: list[EvaluatedJob], is_bootstrap: bool) -> str
             "**Bootstrap Run — Initial Inventory.** This is the first run; all discovered "
             "postings below represent the initial scan, not newly-posted jobs."
         )
-    new_count = sum(
-        1
-        for job in evaluated_jobs
-        if job.status == JobStatus.NEW and job.ai_match_score is not None
-    )
+    new_count = sum(1 for job in evaluated_jobs if job.status == JobStatus.NEW)
     return f"**Total new postings: {new_count}**"
 
 

@@ -399,3 +399,60 @@ def test_job_with_unavailable_ai_match_score_is_not_rendered():
     )
 
     assert "view/6" not in report
+
+
+def test_summary_count_includes_new_jobs_with_an_unavailable_ai_match_score():
+    # Review bulgusu (Major): FR-11/PRD 16.1'in "toplam yeni ilan sayisi"
+    # gereksinimi, AI Match Scoring'in mevcut olup olmadigindan
+    # BAGIMSIZDIR - Scoring Unavailable (ai_match_score=None) bir NEW
+    # ilan hala GERCEKTEN bulunmus bir yeni ilandir ve ozet sayima dahil
+    # edilmelidir, Top Matches/departman bolumlerinden kasitli olarak
+    # dislanmasi bundan ayri bir konudur.
+    scored_job = _job(
+        job_id="https://www.linkedin.com/jobs/view/7",
+        status=JobStatus.NEW,
+        ai_match_score=90.0,
+    )
+    unavailable_job = _job(
+        job_id="https://www.linkedin.com/jobs/view/8",
+        ai_match_score=None,
+        match_rationale=None,
+        status=JobStatus.NEW,
+    )
+    job_repository = _FakeJobRepository(
+        {
+            "https://www.linkedin.com/jobs/view/7": _job_posting(
+                job_id="https://www.linkedin.com/jobs/view/7",
+                application_url="https://www.linkedin.com/jobs/view/7",
+            ),
+            "https://www.linkedin.com/jobs/view/8": _job_posting(
+                job_id="https://www.linkedin.com/jobs/view/8",
+                application_url="https://www.linkedin.com/jobs/view/8",
+            ),
+        }
+    )
+    company_scores = {
+        "Acme Corp": CompanyScore(
+            company_id="Acme Corp",
+            weight_profile_id=None,
+            rubric_version=1,
+            score_total=85.0,
+            score_breakdown={},
+            evaluated_at=EVALUATED_AT,
+        )
+    }
+
+    report = compile_report(
+        [scored_job, unavailable_job],
+        job_repository,
+        company_scores,
+        top_n=10,
+        run_date=RUN_DATE,
+        is_bootstrap=False,
+    )
+
+    assert "Total new postings: 2" in report
+    # Sayima dahil olmasi, render edilmesi gerektigi anlamina gelmez -
+    # Scoring Unavailable ilan hala Top Matches/departman bolumlerinde
+    # GORUNMEZ (gecerli bir gerekce blogu olmadigi icin).
+    assert "view/8" not in report
