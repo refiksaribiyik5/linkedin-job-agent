@@ -139,13 +139,25 @@ class CompanyQualityWeights(BaseModel):
 
 
 class Thresholds(BaseModel):
-    """PRD Section 17 esik tablosu + Section 12.4'un tazelik penceresi."""
+    """PRD Section 17 esik tablosu + Section 12.4'un tazelik penceresi.
+
+    `department_confidence_tolerance` (Roadmap M2.1 duzeltmesi, M9.3
+    tasarim incelemesinde bulunan Gap B): `filtering/pipeline.py`'nin
+    (M6.5, degistirilmemis) Department borderline mantigi bu degeri
+    zorunlu bir parametre olarak alir, ancak `borderline_band_width`
+    (yalnizca 0-100 puanlik AI Match Score olceginde tanimli) M6.5'in
+    kendi onaylanmis karariyla buraya dogrudan uygulanamaz - department
+    confidence 0-1 olceklidir. Somut varsayilan deger burada
+    SABITLENMEZ (bkz. Roadmap amendment metni); `system.defaults.yaml`
+    bu alan icin ayri bir varsayilan deger tasir.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     company_quality_score: float = Field(ge=0, le=100)
     ai_match_score: float = Field(ge=0, le=100)
     department_confidence: float = Field(ge=0, le=1)
+    department_confidence_tolerance: float = Field(ge=0, le=1)
     borderline_band_width: float = Field(ge=0)
     company_score_reevaluation_window_days: int = Field(gt=0)
 

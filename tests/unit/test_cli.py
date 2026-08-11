@@ -205,6 +205,7 @@ def _minimal_valid_system_defaults() -> dict:
             "company_quality_score": 50,
             "ai_match_score": 60,
             "department_confidence": 0.65,
+            "department_confidence_tolerance": 0.05,
             "borderline_band_width": 5,
             "company_score_reevaluation_window_days": 30,
         },

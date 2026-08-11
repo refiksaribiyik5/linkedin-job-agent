@@ -84,6 +84,11 @@ thresholds:
   company_quality_score: 50
   ai_match_score: 60
   department_confidence: 0.65
+  # Roadmap M2.1 duzeltmesi (M9.3 tasarim incelemesi, Gap B): Department
+  # borderline mantigi icin ayri bir tolerans - borderline_band_width
+  # (0-100 puanlik AI Match Score olcegi) buraya dogrudan uygulanamaz
+  # (0-1 olcekli department confidence icin anlamsiz olurdu).
+  department_confidence_tolerance: 0.05
   borderline_band_width: 5
   # Section 12.4: Company Quality Score yeniden kullanim (cache tazelik) penceresi.
   company_score_reevaluation_window_days: 30
