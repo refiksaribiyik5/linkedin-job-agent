@@ -77,8 +77,8 @@ Bu belge, TDD'de tanımlanan mimariyi **küçük, bağımsız olarak uygulanabil
 - **Oluşturulacak Dosyalar:** `domain/job_posting.py`, `domain/company_profile.py`, `domain/evaluated_job.py`, `domain/user_profile.py`, `domain/report.py`, `domain/run_log.py`, `domain/account_context.py`.
 - **Bileşenler:** Domain katmanı (Section 3'teki "Domain/Core").
 - **Bağımlılıklar:** M0.1.
-- **Beklenen Sonuç:** Her varlık, PRD 15.x'teki alan listesiyle birebir örtüşen, doğrulanabilir bir model olarak var olur; hiçbir model dış kütüphaneye (DB, HTTP) bağımlı değildir.
-- **Tamamlanma Doğrulaması:** Birim testleri her modeli geçerli veriyle örnekler ve geçersiz veriyle (örn. skor aralığı dışı bir AI Match Score) `ValidationError` fırlatıldığını doğrular.
+- **Beklenen Sonuç:** Her varlık, PRD 15.x'teki alan listesiyle birebir örtüşen, doğrulanabilir bir model olarak var olur; hiçbir model dış kütüphaneye (DB, HTTP) bağımlı değildir. `FilterResult`, ayrıca yalnızca departman filtresinin doldurduğu (diğer filtrelerde `None` kalan) opsiyonel bir `matched_cluster: str | None` alanı taşır — M9.3'ün implementasyonu sırasında bulunan bir boşluğun düzeltmesidir: `filtering/department_filter.py`'nin (M6.4) zaten hesapladığı eşleşen departman kümesi adı, yalnızca serbest metin `reason` alanına gömülüyordu; `EvaluatedJob.department_cluster`'ı (FR-11, Must-have departman gruplama) doldurmak için Orchestrator'ın metin ayrıştırması yapmasını veya `department_filter.py`'nin dahili mantığını yeniden uygulamasını gerektirirdi — ikisi de kaçınılması istenen desenlerdir.
+- **Tamamlanma Doğrulaması:** Birim testleri her modeli geçerli veriyle örnekler ve geçersiz veriyle (örn. skor aralığı dışı bir AI Match Score) `ValidationError` fırlatıldığını doğrular. `FilterResult.matched_cluster`'ın varsayılan olarak `None` olduğu ve açıkça verildiğinde doğru şekilde taşındığı ayrıca doğrulanır.
 - **Tahmini Süre:** 3–5 saat.
 
 ### M1.2 — Veritabanı Şeması v1
@@ -286,8 +286,8 @@ Bu belge, TDD'de tanımlanan mimariyi **küçük, bağımsız olarak uygulanabil
 - **Oluşturulacak Dosyalar:** `filtering/department_filter.py`.
 - **Bileşenler:** Filtering Pipeline, LLM Gateway.
 - **Bağımlılıklar:** M6.3, M5.3.
-- **Beklenen Sonuç:** Listede birebir olmayan ama anlamca yakın unvanlar (TR/EN) doğru güven skoruyla yakalanır.
-- **Tamamlanma Doğrulaması:** 15–20 başlık/açıklama çiftinden oluşan küratörlü bir test seti (tam eşleşme, yakın-anlamsal eşleşme, açık eşleşmeme, her iki dilde) manuel olarak beklenen sonuçlarla karşılaştırılır.
+- **Beklenen Sonuç:** Listede birebir olmayan ama anlamca yakın unvanlar (TR/EN) doğru güven skoruyla yakalanır. `filter_by_department()`, ayrıca `DepartmentMatchInference.matched_cluster`'ı (zaten hesaplanan bir değer) doğrudan dönen `FilterResult.matched_cluster` alanına yazar — M9.3'ün implementasyonu sırasında bulunan bir boşluğun (bkz. M1.1 düzeltmesi) düzeltmesidir. Reddedilen veya Gateway başarısız olan durumlarda `matched_cluster` `None` kalır.
+- **Tamamlanma Doğrulaması:** 15–20 başlık/açıklama çiftinden oluşan küratörlü bir test seti (tam eşleşme, yakın-anlamsal eşleşme, açık eşleşmeme, her iki dilde) manuel olarak beklenen sonuçlarla karşılaştırılır. Eşleşen bir küme bulunduğunda `FilterResult.matched_cluster`'ın o kümenin adını taşıdığı; küme bulunamadığında veya Gateway başarısız olduğunda `None` kaldığı ayrıca doğrulanır.
 - **Tahmini Süre:** 4–6 saat.
 
 ### M6.5 — Filtreleme Zinciri Montajı
