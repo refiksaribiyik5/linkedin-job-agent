@@ -95,8 +95,8 @@ Bu belge, TDD'de tanımlanan mimariyi **küçük, bağımsız olarak uygulanabil
 - **Oluşturulacak Dosyalar:** `db/repositories/account_repository.py`, `job_repository.py`, `company_repository.py`, `evaluated_job_repository.py`, `report_repository.py`, `run_log_repository.py`.
 - **Bileşenler:** Repository katmanı.
 - **Bağımlılıklar:** M1.2.
-- **Beklenen Sonuç:** Her varlık için temel create/read/update işlemleri çalışır durumdadır.
-- **Tamamlanma Doğrulaması:** Birim testleri (test DB'sine karşı) her repository için CRUD akışını doğrular; Account-Scoped bir repository metodunun `account_id` olmadan çağrılamayacağı (imza seviyesinde) doğrulanır.
+- **Beklenen Sonuç:** Her varlık için temel create/read/update işlemleri çalışır durumdadır. `EvaluatedJobRepositoryPort`, ayrıca bir hesabın tüm değerlendirilmiş ilanlarını döndüren tek bir toplu okuma metodu (`list_by_account(account_id) -> list[EvaluatedJob]`) sağlar — M9.3'ün tasarım incelemesinde bulunan bir boşluğun (Gap D) düzeltmesidir: `history/diff_engine.py`'nin (M4.2, değiştirilmemiş) Closed-ilan tespiti (FR-10, Must-have) hesabın önceden bilinen tüm ilanlarını gerektirir; tek-kayıt sorgulayan `get_by_account_and_job` bunu karşılayamaz. Metot herhangi bir durum filtrelemesi yapmaz (ham liste döner) — filtreleme mantığı zaten `diff_job_postings()`'in kendisindedir.
+- **Tamamlanma Doğrulaması:** Birim testleri (test DB'sine karşı) her repository için CRUD akışını doğrular; Account-Scoped bir repository metodunun `account_id` olmadan çağrılamayacağı (imza seviyesinde) doğrulanır. `list_by_account`'ın bir hesabın birden fazla kaydını doğru döndürdüğü ve başka bir hesabın kayıtlarını hiçbir şekilde sızdırmadığı ayrıca doğrulanır.
 - **Tahmini Süre:** 4–6 saat.
 
 ### M1.4 — Bootstrap / Seed Script'i
@@ -104,7 +104,7 @@ Bu belge, TDD'de tanımlanan mimariyi **küçük, bağımsız olarak uygulanabil
 - **Oluşturulacak Dosyalar:** `config/system.defaults.yaml`, `config/accounts/default.account.yaml`, seed script (`cli.py`'nin ilk taslağı veya ayrı bir `scripts/seed.py`).
 - **Bileşenler:** Config Service (ilk hali), Account Service.
 - **Bağımlılıklar:** M1.3.
-- **Beklenen Sonuç:** Boş bir veritabanına karşı seed çalıştırıldığında bir `accounts` satırı, bir `user_profiles` satırı ve `config_version=1, is_active=true` olan bir `account_config_profiles` satırı oluşur.
+- **Beklenen Sonuç:** Boş bir veritabanına karşı seed çalıştırıldığında bir `accounts` satırı, bir `user_profiles` satırı ve `config_version=1, is_active=true` olan bir `account_config_profiles` satırı oluşur. `system.defaults.yaml`'ın `thresholds` bölümü, ayrıca `department_confidence_tolerance` için bir varsayılan değer taşır (bkz. M2.1 düzeltmesi, Gap B) — somut sayısal değer, mimari belgede sabitlenmez; M9.3'ün implementasyon aşamasında belirlenir.
 - **Tamamlanma Doğrulaması:** Seed sonrası DB sorgulanır; oluşan hesap kimliğiyle (henüz taslak) bir `AccountContext` kurulabildiği doğrulanır.
 - **Tahmini Süre:** 2–3 saat.
 
@@ -117,8 +117,8 @@ Bu belge, TDD'de tanımlanan mimariyi **küçük, bağımsız olarak uygulanabil
 - **Oluşturulacak Dosyalar:** `config/schema.py`, `config/validator.py`.
 - **Bileşenler:** Config Service.
 - **Bağımlılıklar:** M1.1.
-- **Beklenen Sonuç:** Geçerli bir config kabul edilir; toplamı %100 olmayan ağırlıklar veya tanımsız bir departman referansı reddedilir ve anlaşılır bir hata mesajı üretir.
-- **Tamamlanma Doğrulaması:** Birim testleri en az bir geçerli ve üç geçersiz (ağırlık toplamı hatalı, eşik aralık dışı, tanımsız referans) config ile doğrulayıcıyı çalıştırır.
+- **Beklenen Sonuç:** Geçerli bir config kabul edilir; toplamı %100 olmayan ağırlıklar veya tanımsız bir departman referansı reddedilir ve anlaşılır bir hata mesajı üretir. `Thresholds`, ayrıca yapılandırılabilir bir `department_confidence_tolerance: float` (0–1 aralığında) alanını taşır — M9.3'ün tasarım incelemesinde bulunan bir boşluğun (Gap B) düzeltmesidir: `filtering/pipeline.py`'nin (M6.5, değiştirilmemiş) Department borderline mantığı bu değeri zorunlu bir parametre olarak alır, ancak `borderline_band_width` (yalnızca 0–100 puanlık AI Match Score ölçeğinde tanımlı) M6.5'in kendi onaylanmış kararıyla buraya doğrudan uygulanamaz.
+- **Tamamlanma Doğrulaması:** Birim testleri en az bir geçerli ve üç geçersiz (ağırlık toplamı hatalı, eşik aralık dışı, tanımsız referans) config ile doğrulayıcıyı çalıştırır. `department_confidence_tolerance` alanının 0–1 aralığı dışında bir değerle reddedildiği ayrıca doğrulanır.
 - **Tahmini Süre:** 3–5 saat.
 
 ### M2.2 — Config Loader (Öncelik Zinciri + AccountContext)
