@@ -40,9 +40,9 @@ Bu belge, TDD'de tanımlanan mimariyi **küçük, bağımsız olarak uygulanabil
 | Faz 6 — Filtreleme | 5 | Blacklist, Location, Experience, Department, zincir | 13–20 saat |
 | Faz 7 — Skorlama | 3 | Company Quality Score, AI Match Score, Borderline | 13–19 saat |
 | Faz 8 — Sıralama & Raporlama | 3 | Ranking, rapor şablonu, kalıcı depolama | 8–12 saat |
-| Faz 9 — Orkestrasyon & Zamanlama | 6 | RunLock, Orchestrator, hata/retry, log, scheduler, CLI | 20–31 saat |
+| Faz 9 — Orkestrasyon & Zamanlama | 7 | RunLock, Company Score Repository, Orchestrator, hata/retry, log, scheduler, CLI | 23–35 saat |
 | Faz 10 — Paketleme & İlk Çalıştırma | 2 | Docker Compose tamamlama, gerçek bootstrap run | 5–9 saat |
-| **Toplam** | **39** | | **≈120–190 saat** (~3–5 hafta tam zamanlı, ~6–9 hafta yarı zamanlı) |
+| **Toplam** | **40** | | **≈123–194 saat** (~3–5 hafta tam zamanlı, ~6–9 hafta yarı zamanlı) |
 
 *En büyük belirsizlik kaynakları: Faz 3 (LinkedIn'in gerçek DOM yapısı/seçicileri) ve Faz 5–7 (prompt kalitesi/grounding iterasyonu). Diğer fazlar büyük ölçüde belirlenimcidir ve tahminlerin alt ucuna yakın seyretmesi beklenir.*
 
@@ -374,47 +374,56 @@ Bu belge, TDD'de tanımlanan mimariyi **küçük, bağımsız olarak uygulanabil
 - **Tamamlanma Doğrulaması:** Kilidi al, ikinci alım denemesinin reddedildiğini doğrula; `lock_expires_at`'i geçmişe ayarlayıp üçüncü denemenin başarılı olduğunu doğrula.
 - **Tahmini Süre:** 2–3 saat.
 
-### M9.2 — Run Orchestrator (Uçtan Uca Kablo)
+### M9.2 — Company Score Repository
+- **Amaç:** FR-18/PRD Section 12.4'ün şirket-seviyesi skor önbellekleme gereksinimini karşılamak için `CompanyScore`'a (M7.1) kalıcılık kazandırmak — `CompanyScoreOrm` (M1.2) zaten var ama onu saran bir port/repository yok. Yalnızca kalıcılık eklenir: `score_company()`, `score_cache.py` ve Company Quality puanlama kuralları (Section 12.1'in altı boyutu/ağırlıkları) hiçbir şekilde değiştirilmez. Tazelik penceresi (freshness window) değerlendirmesi bu milestone'un kapsamı dışındadır — bu Port ham `get_by_key` sonucunu döner, `evaluated_at`'in `Thresholds.company_score_reevaluation_window_days` içinde olup olmadığına karar vermek Orchestrator'ın (M9.3) sorumluluğunda kalır.
+- **Oluşturulacak Dosyalar:** `ports/company_score_repository_port.py`, `db/repositories/company_score_repository.py`.
+- **Bileşenler:** Company Score Repository.
+- **Bağımlılıklar:** M1.2, M7.1.
+- **Beklenen Sonuç:** Bir `CompanyScore`, `company_id + weight_profile_id + rubric_version` bileşik anahtarıyla kalıcı olarak oluşturulabilir, okunabilir ve güncellenebilir.
+- **Tamamlanma Doğrulaması:** Birim testleri (gerçek test DB'sine karşı): bir `CompanyScore` oluşturulur ve aynı anahtarla `get_by_key` ile geri okunur; farklı bir `rubric_version` veya `weight_profile_id` ile aynı `company_id`'nin AYRI bir kayıt oluşturduğu (Section 12.4 çok-kullanıcılı önbellekleme kuralı) doğrulanır; `update()` var olan kaydı değiştirir; `get_by_key` bulunamayan bir anahtar için `None` döner.
+- **Tahmini Süre:** 3–4 saat.
+
+### M9.3 — Run Orchestrator (Uçtan Uca Kablo)
 - **Amaç:** Collection→Normalization→History→Filtering→Scoring→Ranking→Reporting→State Update'i tek bir çağrıda birleştirmek; "eager cache, atomic final state" transaction sınırını (Section 17) ve merkezi hata sınıflandırmasını (Section 20) uygulamak.
 - **Oluşturulacak Dosyalar:** `run/orchestrator.py`.
 - **Bileşenler:** Run Orchestrator (tüm önceki servisler).
-- **Bağımlılıklar:** Faz 3–8'in tamamı, M9.1.
+- **Bağımlılıklar:** Faz 3–8'in tamamı, M9.1, M9.2.
 - **Beklenen Sonuç:** Tek bir fonksiyon çağrısı, bir `AccountContext` için tam bir döngüyü uçtan uca çalıştırır.
 - **Tamamlanma Doğrulaması:** İlk gerçek entegrasyon testi — küçük/kontrollü bir fixture'a (veya `max_jobs=3` ile sınırlı gerçek bir LinkedIn çalıştırmasına) karşı çalıştırılır; bir rapor dosyası + doğru `run_logs` satırı + doğru `evaluated_jobs` satırları doğrulanır. Ayrıca pipeline ortasında kasıtlı bir hata tetiklenip `evaluated_jobs`/`reports`/`run_logs`'un değişmediği (atomiklik) doğrulanır.
 - **Tahmini Süre:** 6–10 saat.
 
-### M9.3 — Hata Sınıflandırma + Retry
+### M9.4 — Hata Sınıflandırma + Retry
 - **Amaç:** Section 20'nin `TransientError`/`PermanentError`/`PartialRecordError` taksonomisini ve Section 21'in backoff/circuit-breaker-lite mekanizmasını LinkedIn ve LLM çağrı noktalarına uygulamak.
 - **Oluşturulacak Dosyalar:** Ortak bir retry/backoff yardımcı modülü; M3.3 ve M5.1'deki çağrı noktaları bu modülü kullanacak şekilde güncellenir.
 - **Bileşenler:** Run Orchestrator, Collection Service, LLM Gateway.
-- **Bağımlılıklar:** M9.2.
+- **Bağımlılıklar:** M9.3.
 - **Beklenen Sonuç:** Geçici hatalar otomatik olarak yeniden denenir; ardışık hata eşiği aşılınca toplama erken durur ve Run "Partial" işaretlenir.
 - **Tamamlanma Doğrulaması:** Sahte bir "önce N kez başarısız, sonra başarılı" istemciyle doğru retry sayısı/zamanlaması; her zaman başarısız bir istemciyle devre kesicinin erken durup Run'ı Partial işaretlediği doğrulanır.
 - **Tahmini Süre:** 4–6 saat.
 
-### M9.4 — Loglama (Yapılandırılmış + Redaksiyon)
+### M9.5 — Loglama (Yapılandırılmış + Redaksiyon)
 - **Amaç:** FR-15/NFR-10'un gözlemlenebilirlik sözleşmesini gerçek kılmak.
 - **Oluşturulacak Dosyalar:** `logging/structured_logger.py`; önceki modüllere loglama çağrıları eklenir.
 - **Bileşenler:** Structured Logger.
-- **Bağımlılıklar:** M9.2.
+- **Bağımlılıklar:** M9.3.
 - **Beklenen Sonuç:** Her ERROR, `run_logs.error_detail`'i doldurur; hiçbir secret log satırında görünmez.
 - **Tamamlanma Doğrulaması:** Kasıtlı olarak geçersiz bir secret ile çalıştırma yapılıp log dosyası grep'lenerek redaksiyon doğrulanır; bir hata tetiklenip `error_detail`'in dolu olduğu doğrulanır.
 - **Tahmini Süre:** 3–4 saat.
 
-### M9.5 — Scheduler Port + APScheduler Adapter
+### M9.6 — Scheduler Port + APScheduler Adapter
 - **Amaç:** FR-12'nin otomatik çizelgesini ve NFR-14'ün jitter'ını, `next_run_at` kalıcılığı (TDD v1.1 Fix 5) dahil uygulamak.
 - **Oluşturulacak Dosyalar:** `ports/scheduler_port.py`, `adapters/scheduling/apscheduler_adapter.py`.
 - **Bileşenler:** Scheduling Service.
-- **Bağımlılıklar:** M9.2, M9.1.
+- **Bağımlılıklar:** M9.3, M9.1.
 - **Beklenen Sonuç:** Kısa bir test aralığıyla (örn. 2 dakika) çizelge, jitter penceresi içinde otomatik olarak tetiklenir; `next_run_at` süreç yeniden başlatıldığında korunur.
 - **Tamamlanma Doğrulaması:** Kısa aralıklı manuel test; yeniden başlatma sonrası çizelgenin kaybolmadığının doğrulanması.
 - **Tahmini Süre:** 3–5 saat.
 
-### M9.6 — CLI Genişletmesi (Manuel Tetikleme)
+### M9.7 — CLI Genişletmesi (Manuel Tetikleme)
 - **Amaç:** FR-12'nin manuel tetiklemesini, otomatik çizelgeden bağımsız olarak eklemek.
 - **Oluşturulacak Dosyalar:** `cli.py`'ye `run` komutu eklenir.
 - **Bileşenler:** CLI, Run Orchestrator, RunLock.
-- **Bağımlılıklar:** M9.2, M9.1.
+- **Bağımlılıklar:** M9.3, M9.1.
 - **Beklenen Sonuç:** Zamanlayıcı boştayken manuel çalıştırma başarılı olur; bir çalıştırma zaten sürüyorken manuel tetikleme anlaşılır bir mesajla reddedilir.
 - **Tamamlanma Doğrulaması:** Her iki senaryonun manuel testi.
 - **Tahmini Süre:** 2–3 saat.
