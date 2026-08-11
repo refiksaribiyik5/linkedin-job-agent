@@ -124,11 +124,28 @@ forbidden_modules = ["linkedinbot.adapters"]
 # karsiligidir -- bir Port hicbir zaman kendi somut implementasyonunu
 # (db.repositories) veya baska bir adapter'i bilmemelidir, aksi halde
 # soyutlama tersine doner (adapter'a bagimli bir "arayuz" anlamsizdir).
+#
+# M9.2 istisnasi (dar kapsamli, tek bir kenar icin): CompanyScoreRepositoryPort,
+# tip guvenligi icin CompanyScore'u (M7.1, degistirilmemis) TYPE_CHECKING
+# altinda import eder. CompanyScore, scoring/company_scoring.py icinde
+# tanimlidir; o dosya AYRICA (yalnizca score_company()'nin imzasi icin,
+# CompanyScore'un KENDISIYLE ilgisi olmayan bir nedenle) LLMGateway'i
+# (linkedinbot.adapters) import eder - bu yuzden CompanyScore'u import etmek
+# gecisken (transitive) olarak adapters'a bir kenar yaratir. CompanyScore
+# veri sinifinin LLMGateway'e gercek bir bagimliligi YOKTUR; bu sadece iki
+# ilgisiz seyin (saf veri modeli + bir puanlama fonksiyonu) ayni dosyada
+# yasamasinin mekanik bir sonucudur. CompanyScore'u domain/'e tasimak (M7.1'in
+# onaylanmis dosya yerlesimini degistirir) veya bu kontrati genel olarak
+# gevsetmek (exclude_type_checking_imports) yerine, KESIN OLARAK bu TEK kenar
+# yok sayilir - kontrat baska her sey icin tam gucunde kalir.
 [[tool.importlinter.contracts]]
 name = "Ports katmani somut db/adapters implementasyonlarini import edemez"
 type = "forbidden"
 source_modules = ["linkedinbot.ports"]
 forbidden_modules = ["linkedinbot.db", "linkedinbot.adapters"]
+ignore_imports = [
+    "linkedinbot.ports.company_score_repository_port -> linkedinbot.scoring.company_scoring",
+]
 
 # M2.2: AccountContext artik linkedinbot.config.schema'yi import ediyor (bkz.
 # domain/account_context.py modul dokumani - TDD Section 14'un AccountContext
