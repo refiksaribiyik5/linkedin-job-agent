@@ -197,6 +197,77 @@ def test_update_preserves_original_first_seen_at_regardless_of_caller_input(
     assert fetched.first_seen_at == original_first_seen_at
 
 
+def test_list_by_account_returns_all_records_for_the_account(
+    db_session: Session, account: AccountOrm, company: CompanyOrm, make_config_profile
+):
+    # Roadmap M1.3 duzeltmesi (Gap D, M9.3 tasarim incelemesi): FR-10
+    # Closed-ilan tespiti icin gereken toplu okuma. Filtreleme yapmaz -
+    # ham liste doner.
+    db_session.add(make_config_profile(account.account_id))
+    job_1 = JobPostingOrm(
+        job_id="linkedin-job-bulk-1",
+        title="Sales Executive",
+        company_id=company.company_id,
+        location_text="Istanbul",
+        posted_date=NOW,
+        description="Aciklama",
+        application_url="https://www.linkedin.com/jobs/view/101",
+        collected_at=NOW,
+        content_hash="hash-bulk-1",
+    )
+    job_2 = JobPostingOrm(
+        job_id="linkedin-job-bulk-2",
+        title="Marketing Specialist",
+        company_id=company.company_id,
+        location_text="Istanbul",
+        posted_date=NOW,
+        description="Aciklama",
+        application_url="https://www.linkedin.com/jobs/view/102",
+        collected_at=NOW,
+        content_hash="hash-bulk-2",
+    )
+    db_session.add(job_1)
+    db_session.add(job_2)
+    db_session.flush()
+    repo = SqlAlchemyEvaluatedJobRepository(db_session)
+    repo.create(_evaluated_job(account, job_1, status=JobStatus.NEW))
+    repo.create(_evaluated_job(account, job_2, status=JobStatus.CLOSED))
+
+    results = repo.list_by_account(account.account_id)
+
+    job_ids = {r.job_id for r in results}
+    assert job_ids == {"linkedin-job-bulk-1", "linkedin-job-bulk-2"}
+    # Hicbir durum filtrelemesi yapilmaz - Closed dahil hepsi doner.
+    statuses = {r.job_id: r.status for r in results}
+    assert statuses["linkedin-job-bulk-1"] == JobStatus.NEW
+    assert statuses["linkedin-job-bulk-2"] == JobStatus.CLOSED
+
+
+def test_list_by_account_does_not_leak_other_accounts_records(
+    db_session: Session, account: AccountOrm, company: CompanyOrm, make_config_profile, job
+):
+    db_session.add(make_config_profile(account.account_id))
+    db_session.flush()
+    repo = SqlAlchemyEvaluatedJobRepository(db_session)
+    repo.create(_evaluated_job(account, job))
+
+    other_account = AccountOrm(display_name="Other", created_at=NOW, status="active")
+    db_session.add(other_account)
+    db_session.flush()
+
+    results = repo.list_by_account(other_account.account_id)
+
+    assert results == []
+
+
+def test_list_by_account_returns_empty_list_when_account_has_no_records(
+    db_session: Session, account: AccountOrm
+):
+    repo = SqlAlchemyEvaluatedJobRepository(db_session)
+
+    assert repo.list_by_account(account.account_id) == []
+
+
 def test_update_unknown_account_and_job_raises_value_error(db_session: Session):
     repo = SqlAlchemyEvaluatedJobRepository(db_session)
     ghost = EvaluatedJob(

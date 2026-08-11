@@ -33,6 +33,17 @@ class EvaluatedJobRepositoryPort(ABC):
         """Kayit bulunamazsa None doner."""
 
     @abstractmethod
+    def list_by_account(self, account_id: UUID) -> list[EvaluatedJob]:
+        """Hesabin TUM degerlendirilmis ilanlarini doner (Roadmap M1.3
+        duzeltmesi, M9.3 tasarim incelemesinde bulunan Gap D).
+
+        Hicbir durum filtrelemesi YAPMAZ - ham liste doner. Bu, `history/
+        diff_engine.py`'nin (M4.2) Closed-ilan tespiti (FR-10) icin
+        gereklidir: hesabin onceden bilinen TUM ilanlarini bilmeden, bu
+        taramada artik gorunmeyenlerin hangileri oldugu belirlenemez.
+        """
+
+    @abstractmethod
     def update(self, evaluated_job: EvaluatedJob) -> EvaluatedJob:
         """`(evaluated_job.account_id, evaluated_job.job_id)` ciftiyle var
         olan satiri gunceller (orn. History/Diff Engine'in M4.2'de

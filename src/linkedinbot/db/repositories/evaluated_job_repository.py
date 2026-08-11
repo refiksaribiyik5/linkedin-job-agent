@@ -113,6 +113,16 @@ class SqlAlchemyEvaluatedJobRepository(EvaluatedJobRepositoryPort):
         ).scalar_one_or_none()
         return _to_domain(orm_job) if orm_job is not None else None
 
+    def list_by_account(self, account_id: UUID) -> list[EvaluatedJob]:
+        orm_jobs = (
+            self._session.execute(
+                select(EvaluatedJobOrm).where(EvaluatedJobOrm.account_id == account_id)
+            )
+            .scalars()
+            .all()
+        )
+        return [_to_domain(orm_job) for orm_job in orm_jobs]
+
     def update(self, evaluated_job: EvaluatedJob) -> EvaluatedJob:
         orm_job = self._session.execute(
             select(EvaluatedJobOrm).where(
