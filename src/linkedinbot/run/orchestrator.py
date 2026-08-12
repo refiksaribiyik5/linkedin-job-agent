@@ -105,6 +105,22 @@ reddedilen bir ilan, `diff_job_postings()`'in ZATEN atadigi durumu
 (M8.2, degistirilmemis) BOYLE bir ilani zaten otomatik olarak
 raporlardan gizler (aynen "Scoring Unavailable" durumuyla AYNI kod
 yolu), bu yuzden AYRI bir durum GEREKMEZ.
+
+**Yapilandirilmis loglama (Roadmap M9.5, TDD Section 19):** `logging.StructuredLogger`
+bir Port DEGILDIR (TDD Section 7'nin "yatay kesen katman"i - herhangi bir
+modulun bagimli olabilecegi capraz-kesen bir servis); bu modul, `run_logs`
+DB tablosunun (kalici, sorgulanabilir gozlemlenebilirlik sozlesmesi,
+degismedi) YANINDA, gecici/dosya-tabanli JSON log satirlari uretir. INFO
+cagrilari `_run_pipeline()`'in dogal asama sinirlarinda (Session Validation,
+Collection, History, Evaluation, Report Compilation, State Update) yer
+alir; TEK bir WARNING cagrisi EDGE-9 (kismi sonuc, `is_complete=False`)
+icindir; TEK bir ERROR cagrisi `run()`'in merkezi hata yakalama noktasinda,
+`error_detail`in AYNI `exc` degerinden AYNI kod noktasinda dolduruldugu
+yerdedir - TDD Section 19'un "her ERROR run_logs.error_detail'i doldurmak
+ZORUNDADIR" kuralinin yapisal garantisi budur (ayri bir dogrulama testiyle
+denetlenir). Hesabin hic var olmadigi (IntegrityError re-raise) uc durumda
+HICBIR ERROR logu yazilmaz - o yolda zaten hicbir `run_logs` satiri
+YAZILAMAZ (yukaridaki not), bu yuzden eslesecek bir `error_detail` yoktur.
 """
 
 from __future__ import annotations
@@ -137,6 +153,7 @@ if TYPE_CHECKING:
     from linkedinbot.adapters.llm.gateway import LLMGateway
     from linkedinbot.domain.account_context import AccountContext
     from linkedinbot.domain.job_posting import JobPosting
+    from linkedinbot.logging.structured_logger import StructuredLogger
     from linkedinbot.ports.company_repository_port import CompanyRepositoryPort
     from linkedinbot.ports.company_score_repository_port import CompanyScoreRepositoryPort
     from linkedinbot.ports.evaluated_job_repository_port import EvaluatedJobRepositoryPort
@@ -179,6 +196,14 @@ class OrchestratorDependencies:
     orneklerine referanstir. Bu modul HICBIRINI somutlastirmaz (kendi
     concrete implementasyonunu secmez) - cagiran (gelecekteki M9.6/M9.7)
     hangi adaptorlerin kullanilacagina karar verir.
+
+    `structured_logger` (Roadmap M9.5, TDD Section 19): `logging.StructuredLogger`
+    bir Port DEGILDIR (TDD Section 7'nin "yatay kesen katman" - herhangi
+    bir modulun bagimli olabilecegi capraz-kesen bir servis, ozel bir
+    soyutlama katmani gerektirmez); yine de digerleriyle AYNI enjeksiyon
+    deseniyle burada tasinir - orchestrator kendi StructuredLogger
+    ornegini somutlastirmaz, cagiran (gelecekteki M9.6/M9.7) hangi
+    dosya yolu/seviye ile kurulacagina karar verir.
     """
 
     session: Session
@@ -191,6 +216,7 @@ class OrchestratorDependencies:
     evaluated_job_repository: EvaluatedJobRepositoryPort
     report_repository: ReportRepositoryPort
     run_log_repository: RunLogRepositoryPort
+    structured_logger: StructuredLogger
 
 
 def _company_context(company: CompanyProfile) -> str:
@@ -431,6 +457,12 @@ def _run_pipeline(
     is_bootstrap: bool,
 ) -> RunLog:
     dependencies.linkedin_port.validate(account_id)
+    dependencies.structured_logger.info(
+        account_id=account_id,
+        run_id=run_id,
+        stage="Session Validation",
+        message="Oturum dogrulandi.",
+    )
 
     config_profile = account_context.config_profile
 
@@ -449,6 +481,25 @@ def _run_pipeline(
     )
     raw_records = extract_records(collection_result.raw_cards)
     jobs_collected = len(raw_records)
+    dependencies.structured_logger.info(
+        account_id=account_id,
+        run_id=run_id,
+        stage="Collection",
+        message=f"{jobs_collected} ham ilan toplandi.",
+        extra={
+            "jobs_collected": jobs_collected,
+            "collection_capped": collection_result.collection_capped,
+        },
+    )
+    if not collection_result.is_complete:
+        # EDGE-9 (kismi sonuc) - TDD Section 19'un WARNING orneginin
+        # BIREBIR karsiligi: kurtarilabilir bir anomali, Run'i durdurmaz.
+        dependencies.structured_logger.warning(
+            account_id=account_id,
+            run_id=run_id,
+            stage="Collection",
+            message=collection_result.partial_reason or "Toplama tam degil.",
+        )
 
     current_scan = [normalize_record(record, now) for record in raw_records]
     content_hash_by_job_id = {
@@ -467,6 +518,16 @@ def _run_pipeline(
     }
 
     diff_results, newly_closed_job_ids = diff_job_postings(current_scan, previous_evaluations)
+    dependencies.structured_logger.info(
+        account_id=account_id,
+        run_id=run_id,
+        stage="History",
+        message=f"{len(diff_results)} ilan gecmisle karsilastirildi.",
+        extra={
+            "diffed": len(diff_results),
+            "candidate_closures": len(newly_closed_job_ids),
+        },
+    )
 
     # Eager write: companies, sonra job_postings (TDD Section 17 - hemen
     # yazilabilir veri). Sira KASITLIDIR: `job_postings.company_id`,
@@ -510,6 +571,13 @@ def _run_pipeline(
         evaluated_jobs.append(evaluated_job)
 
     dependencies.session.commit()  # eager: companies/company_scores (Section 17)
+    dependencies.structured_logger.info(
+        account_id=account_id,
+        run_id=run_id,
+        stage="Evaluation",
+        message=f"{jobs_filtered} ilan filtreleri gecti.",
+        extra={"jobs_filtered": jobs_filtered},
+    )
 
     # Kapanan ilanlar: onceki EvaluatedJob'un status'u Closed'e cevrilir.
     #
@@ -662,6 +730,13 @@ def _run_pipeline(
             storage_path=storage_path,
         )
     )
+    dependencies.structured_logger.info(
+        account_id=account_id,
+        run_id=run_id,
+        stage="Report Compilation",
+        message=f"Rapor derlendi ({len(included_job_ids)} ilan icerir).",
+        extra={"included_job_ids_count": len(included_job_ids)},
+    )
 
     # State Update (PRD adim 11): raporlanan ilanlarin report_appearances_count'u
     # artirilir; TUM bu calistirmada islenen EvaluatedJob'lar kalici hale getirilir.
@@ -679,6 +754,13 @@ def _run_pipeline(
         )
 
     dependencies.session.commit()  # atomic final state: evaluated_jobs + reports + run_logs
+    dependencies.structured_logger.info(
+        account_id=account_id,
+        run_id=run_id,
+        stage="State Update",
+        message=f"Calistirma tamamlandi: {jobs_new} yeni, {jobs_closed} kapali.",
+        extra={"jobs_new": jobs_new, "jobs_closed": jobs_closed, "status": str(run_log.status)},
+    )
     return created_run_log
 
 
@@ -778,6 +860,18 @@ def run(
             dependencies.session.rollback()
             raise exc from None
         dependencies.session.commit()
+        # TDD Section 19: "her ERROR, karsilik gelen run_logs.error_detail
+        # alanini doldurmak ZORUNDADIR" - bu cagri VE `error_detail=str(exc)`
+        # (yukarida) AYNI `exc` degerinden turer ve AYNI kod noktasinda
+        # (Failed run_logs satiri BASARIYLA persist edildikten hemen sonra)
+        # birlikte gerceklesir, boylece bu esleme yapisal olarak garanti
+        # edilir (bkz. test_orchestrator.py'nin bu kuralı denetleyen testi).
+        dependencies.structured_logger.error(
+            account_id=account_id,
+            run_id=run_id,
+            stage="Run",
+            message=str(exc),
+        )
         return failed_run_log
     finally:
         if lock_acquired:

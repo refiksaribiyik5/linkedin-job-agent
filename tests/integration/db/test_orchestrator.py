@@ -274,6 +274,56 @@ class _RaisingReportStore(ReportStorePort):
         raise OSError("simulated disk failure")
 
 
+class _CapturingStructuredLogger:
+    """Gercek dosya G/C'si yapmayan, tum `.info()/.warning()/.error()`
+    cagrilarini bellekte tutan sahte StructuredLogger (Roadmap M9.5).
+    `structured_logger.py`'nin kendi davranisi (redaksiyon, best-effort,
+    JSON bicimi) `tests/unit/logging/test_structured_logger.py`'de ZATEN
+    ayrintili sekilde test edilir - burada YALNIZCA orchestrator'in
+    DOGRU asamalarda/seviyelerde cagri yaptigini dogrulamak icin
+    kullanilir (TDD Section 19'un "her ERROR run_logs.error_detail'i
+    doldurmak ZORUNDADIR" kurali dahil)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def info(self, *, account_id, run_id, stage, message, extra=None):
+        self.calls.append(
+            {
+                "level": "INFO",
+                "account_id": account_id,
+                "run_id": run_id,
+                "stage": stage,
+                "message": message,
+                "extra": extra,
+            }
+        )
+
+    def warning(self, *, account_id, run_id, stage, message, extra=None):
+        self.calls.append(
+            {
+                "level": "WARNING",
+                "account_id": account_id,
+                "run_id": run_id,
+                "stage": stage,
+                "message": message,
+                "extra": extra,
+            }
+        )
+
+    def error(self, *, account_id, run_id, stage, message, extra=None):
+        self.calls.append(
+            {
+                "level": "ERROR",
+                "account_id": account_id,
+                "run_id": run_id,
+                "stage": stage,
+                "message": message,
+                "extra": extra,
+            }
+        )
+
+
 def _make_dependencies(
     db_session: Session,
     tmp_path,
@@ -292,6 +342,7 @@ def _make_dependencies(
         evaluated_job_repository=SqlAlchemyEvaluatedJobRepository(db_session),
         report_repository=SqlAlchemyReportRepository(db_session),
         run_log_repository=SqlAlchemyRunLogRepository(db_session),
+        structured_logger=_CapturingStructuredLogger(),
     )
 
 
@@ -613,6 +664,69 @@ def test_mid_pipeline_failure_rolls_back_the_batch_but_keeps_eager_writes_and_lo
         db_session.query(RunLogOrm).filter(RunLogOrm.account_id == account.account_id).count()
     )
     assert run_log_count == 1
+
+
+def test_a_failed_run_produces_exactly_one_error_log_matching_error_detail(
+    db_session: Session, account, tmp_path
+):
+    # Roadmap M9.5, TDD Section 19: "her ERROR, karsilik gelen
+    # run_logs.error_detail alanini doldurmak ZORUNDADIR - bu kural bir
+    # test ile denetlenir." Bu test tam olarak o kuralı denetler: bir Run
+    # basarisiz oldugunda, StructuredLogger tam olarak BIR ERROR-seviyeli
+    # cagri alir ve o cagrinin mesaji, persist edilen `run_logs.error_detail`
+    # ile BIREBIR eslesir.
+    job_url, _company, card = _unique_job_and_card()
+    _seed_account_context(db_session, account.account_id)
+    validate_error = SessionInvalidError("LinkedIn session expired")
+    dependencies = _make_dependencies(
+        db_session,
+        tmp_path,
+        _FakeLinkedInPort([[card]], validate_error=validate_error),
+        _ScriptedLLMGateway(),
+    )
+
+    result = orchestrator.run(
+        account.account_id, dependencies, TriggerType.MANUAL, NOW, LOCK_DURATION, is_bootstrap=True
+    )
+
+    assert result.status == RunStatus.FAILED
+    error_calls = [
+        call for call in dependencies.structured_logger.calls if call["level"] == "ERROR"
+    ]
+    assert len(error_calls) == 1
+    assert error_calls[0]["message"] == result.error_detail
+    assert error_calls[0]["account_id"] == account.account_id
+    assert error_calls[0]["run_id"] == result.run_id
+
+
+def test_a_successful_run_logs_info_at_each_stage_boundary_and_no_error(
+    db_session: Session, account, tmp_path
+):
+    job_url, _company, card = _unique_job_and_card()
+    _seed_account_context(db_session, account.account_id)
+    dependencies = _make_dependencies(
+        db_session, tmp_path, _FakeLinkedInPort([[card]]), _ScriptedLLMGateway()
+    )
+
+    result = orchestrator.run(
+        account.account_id, dependencies, TriggerType.MANUAL, NOW, LOCK_DURATION, is_bootstrap=True
+    )
+
+    # max_jobs_per_run=1 (test fixture) cap'ine tek kartla ulasilir -
+    # PARTIAL (M9.4 "unified completeness"), Failed DEGIL.
+    assert result.status == RunStatus.PARTIAL
+    calls = dependencies.structured_logger.calls
+    assert [call["level"] for call in calls] == [
+        "INFO",  # Session Validation
+        "INFO",  # Collection
+        "WARNING",  # EDGE-9 kismi sonuc (collection_capped -> is_complete=False)
+        "INFO",  # History
+        "INFO",  # Evaluation
+        "INFO",  # Report Compilation
+        "INFO",  # State Update
+    ]
+    assert all(call["account_id"] == account.account_id for call in calls)
+    assert all(call["run_id"] == result.run_id for call in calls)
 
 
 def test_a_job_only_matching_the_department_confidence_tolerance_band_is_borderline(
