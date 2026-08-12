@@ -49,6 +49,11 @@ def _valid_data() -> dict:
             "department_confidence_tolerance": 0.05,
             "borderline_band_width": 5,
             "company_score_reevaluation_window_days": 30,
+            "linkedin_retry_attempts": 3,
+            "llm_retry_attempts": 3,
+            "retry_base_delay_ms": 500,
+            "retry_max_delay_ms": 8000,
+            "linkedin_consecutive_failure_threshold": 5,
         },
         "schedule": {"interval_days": 2, "jitter_minutes": 30},
         "collection_limits": {"max_jobs_per_run": 200},
@@ -152,6 +157,29 @@ def test_config_validation_error_aggregates_violations_across_different_sections
 
     assert any("thresholds" in error for error in exc_info.value.errors)
     assert any("schedule" in error for error in exc_info.value.errors)
+
+
+def test_config_with_retry_base_delay_above_max_delay_is_rejected():
+    # M9.4: retry_base_delay_ms, retry_max_delay_ms'i asamaz - tek-alan
+    # Field(gt=0) siniriyla ifade edilemeyen bir capraz-alan kuraldir.
+    data = _valid_data()
+    data["thresholds"]["retry_base_delay_ms"] = 9000
+    data["thresholds"]["retry_max_delay_ms"] = 8000
+
+    with pytest.raises(ConfigValidationError) as exc_info:
+        validate_config(data)
+
+    assert any("retry_base_delay_ms" in error for error in exc_info.value.errors)
+
+
+def test_config_with_retry_base_delay_equal_to_max_delay_is_accepted():
+    data = _valid_data()
+    data["thresholds"]["retry_base_delay_ms"] = 500
+    data["thresholds"]["retry_max_delay_ms"] = 500
+
+    profile = validate_config(data)
+
+    assert profile.thresholds.retry_base_delay_ms == 500
 
 
 def test_config_with_unrecognized_field_is_rejected_with_clear_message():

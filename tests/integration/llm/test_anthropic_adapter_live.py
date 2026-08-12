@@ -35,7 +35,12 @@ class _Sentiment(BaseModel):
 
 
 def test_generate_structured_makes_a_real_call_and_returns_a_conforming_response():
-    adapter = AnthropicLLMAdapter(api_key=_API_KEY)
+    adapter = AnthropicLLMAdapter(
+        api_key=_API_KEY,
+        llm_retry_attempts=3,
+        retry_base_delay_ms=500,
+        retry_max_delay_ms=8000,
+    )
 
     result = adapter.generate_structured(
         "Classify the sentiment of this sentence as exactly one of: "

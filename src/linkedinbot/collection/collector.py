@@ -90,10 +90,12 @@ from uuid import UUID
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from linkedinbot.config.schema import TargetCriteria
-from linkedinbot.ports.linkedin_port import LinkedInPort
+from linkedinbot.errors import TransientError
+from linkedinbot.ports.linkedin_port import LinkedInPort, SessionInvalidError
+from linkedinbot.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +131,100 @@ def _apply_rate_limit(
     sleep(max(0.0, jittered_delay))
 
 
+class CollectionResult(BaseModel):
+    """PaginationController'in ciktisi (Roadmap M9.4, "unified completeness"
+    duzeltmesi - bagimsiz review sonrasi).
+
+    Kapali-ilan tespiti (FR-10, diff_job_postings), `current_scan`'in TAM
+    (eksiksiz) bir tarama oldugunu VARSAYAR - taranmayan herhangi bir
+    sorgu/sayfa, o sorgunun ilanlarinin "artik gorulmedigi" icin YANLISLIKLA
+    "kapandi" olarak yorumlanmasina yol acar. `is_complete`, bu varsayimin
+    gecerli olup olmadigini temsil eden TEK, birlestirilmis alandir - "Toplama
+    tam mi?" sorusunun dogrudan cevabidir. Varsayilan `True`dur (tam bir
+    tarama). Onu `False` yapan UC BAGIMSIZ (ama birbirini DISLAMAYAN) sebep
+    vardir - hepsi `RunOrchestrator`'in Run'i "Partial" isaretlemesi icin
+    AYNI TEK alani (`is_complete`) okumasini saglar:
+
+    1. `collection_capped=True` (FR-21 ust sinirina ulasildi) - FR-21'in
+       kendi kabul kriteri bunu acikca "toplamanin KESILDIGI" olarak
+       tanimlar (bkz. FR-21 metni: "...toplamayı durdurur ve bu durumu
+       ...toplamanın kesildiğini... Run Log'da açıkça belirtir").
+    2. Devre kesici-lite (Section 21) tetiklendi - ardisik basarisizlik
+       sayisi esigi asti.
+    3. Bir veya daha fazla sorgu TUM yeniden deneme denemelerini tuketti
+       (ama devre kesici esigini ASMADAN, "basarisiz ama devam et" ile bir
+       sonraki sorguya gecildi) - bu sorgunun ilanlari HICBIR ZAMAN
+       BASARIYLA taranamadi, dolayisiyla taramanin geri kalani basarili
+       olsa bile TAM degildir. (Bu, bagimsiz review'un buldugu ucuncu
+       production hatasinin kok sebebiydi: bu durum ONCEDEN hicbir alanda
+       izsiz kaliyordu.)
+
+    `collection_capped` KENDI BASINA ayri bir alan olarak KALIR (FR-21'in
+    "acikca belirtir" gereksinimi icin, "neden" bilgisini korumak amaciyla)
+    ama artik `is_complete`ten BAGIMSIZ degildir: `collection_capped=True`
+    HER ZAMAN `is_complete=False` anlamina gelir (asagidaki validator ile
+    zorunlu kilinir).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    raw_cards: list[str]
+    collection_capped: bool = False
+    is_complete: bool = True
+    partial_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _capped_implies_incomplete(self) -> CollectionResult:
+        if self.collection_capped and self.is_complete:
+            raise ValueError("collection_capped=True iken is_complete=True olamaz.")
+        return self
+
+    @model_validator(mode="after")
+    def _incomplete_requires_a_reason(self) -> CollectionResult:
+        if not self.is_complete and self.partial_reason is None:
+            raise ValueError("is_complete=False iken partial_reason zorunludur.")
+        if self.is_complete and self.partial_reason is not None:
+            raise ValueError("is_complete=True iken partial_reason bos olmalidir.")
+        return self
+
+
+def _fetch_page_with_retry(
+    linkedin_port: LinkedInPort,
+    account_id: UUID,
+    location: str,
+    keywords: str,
+    page: int,
+    *,
+    retry_attempts: int,
+    retry_base_delay_ms: int,
+    retry_max_delay_ms: int,
+    sleep: Callable[[float], None],
+) -> list[str]:
+    """TEK bir sayfa/sorgu istegini `retry_with_backoff()` (retry.py, M9.4)
+    ile sarmalar. `SessionInvalidError` (artik `PermanentError`, bkz.
+    ports/linkedin_port.py) HICBIR ZAMAN `TransientError`'e cevrilmez -
+    dogrudan, degistirilmeden yukari sizar (asla yeniden denenmez, FR-1).
+    BASKA herhangi bir istisna (agi zaman asimi, Playwright hatasi vb.)
+    `TransientError`e cevrilip yeniden deneme dongusune sokulur.
+    """
+
+    def _fetch() -> list[str]:
+        try:
+            return linkedin_port.search_jobs_page(account_id, location, keywords, page)
+        except SessionInvalidError:
+            raise
+        except Exception as exc:
+            raise TransientError(str(exc)) from exc
+
+    return retry_with_backoff(
+        _fetch,
+        max_attempts=retry_attempts,
+        base_delay_ms=retry_base_delay_ms,
+        max_delay_ms=retry_max_delay_ms,
+        sleep=sleep,
+    )
+
+
 def collect_raw_job_cards(
     linkedin_port: LinkedInPort,
     account_id: UUID,
@@ -136,8 +232,12 @@ def collect_raw_job_cards(
     max_jobs_per_run: int,
     delay_seconds: float,
     jitter_seconds: float,
+    linkedin_retry_attempts: int,
+    retry_base_delay_ms: int,
+    retry_max_delay_ms: int,
+    linkedin_consecutive_failure_threshold: int,
     sleep: Callable[[float], None] = time.sleep,
-) -> tuple[list[str], bool]:
+) -> CollectionResult:
     """PaginationController: `target_criteria`'daki her (lokasyon, departman
     kumesi) cifti icin `linkedin_port.search_jobs_page`'i sayfa sayfa
     cagirir, `max_jobs_per_run`'a (FR-21) ulasilana veya butun sorgular
@@ -148,17 +248,41 @@ def collect_raw_job_cards(
     AYRI sorgular (farkli lokasyon/departman) hem de AYNI sorgunun ardisik
     sayfalari arasinda, cunku ikisi de gercek birer LinkedIn istegidir.
 
-    Doner: `(ham_ilan_kartlari, collection_capped)` - `collection_capped`
-    yalnizca sinira ulasildigi icin ERKEN durulduysa `True`'dur; tum
-    sorgular kendiliginden tukendiyse `False`'tur (Roadmap M3.3 "Beklenen
-    Sonuc").
+    Retry + Devre Kesici (M9.4, TDD Section 21): her istek
+    `_fetch_page_with_retry()` araciligiyla `linkedin_retry_attempts`'e
+    kadar yeniden denenir. Bir sorgunun TUM denemeleri tukenirse, ardisik
+    basarisizlik sayaci artirilir ve "basarisiz ama devam et" ile bir
+    sonraki sorguya gecilir - AYNI dogal-bos-sayfa sonlanmasi davranisi.
+    HERHANGI bir basarili istek (bos sayfa DAHIL, cunku bu da GECERLI bir
+    LinkedIn yanitidir) bu sayaci SIFIRLAR. Sayac
+    `linkedin_consecutive_failure_threshold`'u asarsa, toplama HEMEN durur
+    ve `is_complete=False` ile doner.
+
+    Doner: `CollectionResult` - `collection_capped`, yalnizca `max_jobs_per_run`
+    sinirina ulasildigi icin ERKEN durulduysa `True`'dur (Roadmap M3.3
+    "Beklenen Sonuc"). `is_complete`, ASAGIDAKI UC sebepten HERHANGI biri
+    gerceklestiyse `False`'dur (M9.4, "unified completeness" duzeltmesi):
+    devre kesici tetiklendi, `max_jobs_per_run` sinirina ulasildi (yani
+    `collection_capped=True`), veya bir ya da daha fazla sorgu TUM yeniden
+    deneme denemelerini devre kesici esigine ulasmadan tuketti ("basarisiz
+    ama devam et").
     """
     collected: list[str] = []
 
     if max_jobs_per_run <= 0:
-        return collected, True
+        return CollectionResult(
+            raw_cards=collected,
+            collection_capped=True,
+            is_complete=False,
+            partial_reason=(
+                f"Toplama sinirina (max_jobs_per_run={max_jobs_per_run}) hicbir "
+                "sorgu calistirilmadan ulasildi."
+            ),
+        )
 
     is_first_request = True
+    consecutive_failures = 0
+    any_query_failed = False
     for location in target_criteria.locations:
         for titles in target_criteria.departments.values():
             keywords = _build_search_keywords(titles)
@@ -168,16 +292,64 @@ def collect_raw_job_cards(
                     _apply_rate_limit(sleep, delay_seconds, jitter_seconds)
                 is_first_request = False
 
-                cards = linkedin_port.search_jobs_page(account_id, location, keywords, page)
+                try:
+                    cards = _fetch_page_with_retry(
+                        linkedin_port,
+                        account_id,
+                        location,
+                        keywords,
+                        page,
+                        retry_attempts=linkedin_retry_attempts,
+                        retry_base_delay_ms=retry_base_delay_ms,
+                        retry_max_delay_ms=retry_max_delay_ms,
+                        sleep=sleep,
+                    )
+                except TransientError:
+                    any_query_failed = True
+                    consecutive_failures += 1
+                    if consecutive_failures >= linkedin_consecutive_failure_threshold:
+                        return CollectionResult(
+                            raw_cards=collected,
+                            collection_capped=False,
+                            is_complete=False,
+                            partial_reason=(
+                                f"Devre kesici tetiklendi: {consecutive_failures} ardisik "
+                                "LinkedIn hatasi (esik: "
+                                f"{linkedin_consecutive_failure_threshold})."
+                            ),
+                        )
+                    break  # bu sorgu icin "basarisiz ama devam et" (RISK-2)
+
+                consecutive_failures = 0
                 if not cards:
                     break
                 for card in cards:
                     collected.append(card)
                     if len(collected) >= max_jobs_per_run:
-                        return collected, True
+                        return CollectionResult(
+                            raw_cards=collected,
+                            collection_capped=True,
+                            is_complete=False,
+                            partial_reason=(
+                                f"Toplama sinirina (max_jobs_per_run={max_jobs_per_run}) "
+                                "ulasildigi icin toplama kesildi - bazi sorgular/sayfalar hic "
+                                "denenmedi."
+                            ),
+                        )
                 page += 1
 
-    return collected, False
+    if any_query_failed:
+        return CollectionResult(
+            raw_cards=collected,
+            collection_capped=False,
+            is_complete=False,
+            partial_reason=(
+                "Bir veya daha fazla sorgu, devre kesici esigine ulasilmadan tum "
+                "yeniden deneme denemelerini tuketti - bu sorgu(lar) hicbir zaman "
+                "basariyla taranamadi."
+            ),
+        )
+    return CollectionResult(raw_cards=collected)
 
 
 class PartialRecordError(Exception):

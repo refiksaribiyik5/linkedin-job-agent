@@ -124,7 +124,12 @@ def test_department_filter_classifies_curated_title_description_pairs_correctly(
     title, description, expected_passes
 ):
     llm_gateway = LLMGateway(
-        llm_provider=AnthropicLLMAdapter(api_key=_API_KEY),
+        llm_provider=AnthropicLLMAdapter(
+            api_key=_API_KEY,
+            llm_retry_attempts=3,
+            retry_base_delay_ms=500,
+            retry_max_delay_ms=8000,
+        ),
         prompt_registry=PromptRegistry(prompts_dir=_REPO_ROOT / "config" / "prompts"),
     )
     job_posting = _job_posting(title, description)

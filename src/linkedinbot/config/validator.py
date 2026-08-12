@@ -52,6 +52,19 @@ def _weight_sum_error(weights: dict[str, float], label: str) -> str | None:
     return None
 
 
+def _retry_delay_range_error(thresholds) -> str | None:
+    # M9.4 (Hata Siniflandirma + Retry): retry_base_delay_ms/retry_max_delay_ms
+    # tek-alan Field(gt=0) siniriyla ifade edilemeyen bir CAPRAZ-ALAN kurali
+    # tasir - ustel geri cekilmenin baslangic gecikmesi, ust siniri asamaz
+    # (bkz. weight-sum kontrolleriyle AYNI desen).
+    if thresholds.retry_base_delay_ms > thresholds.retry_max_delay_ms:
+        return (
+            "retry_base_delay_ms, retry_max_delay_ms degerinden buyuk olamaz "
+            f"(base={thresholds.retry_base_delay_ms}, max={thresholds.retry_max_delay_ms})."
+        )
+    return None
+
+
 def validate_config(data: dict) -> AccountConfigProfile:
     """Ham bir dict'i (orn. DB'den okunan JSONB alanlarinin birlesimi)
     dogrular.
@@ -84,6 +97,7 @@ def validate_config(data: dict) -> AccountConfigProfile:
                 profile.weights_company_quality.model_dump(),
                 "Company Quality Score boyut agirliklari",
             ),
+            _retry_delay_range_error(profile.thresholds),
         )
         if error is not None
     ]

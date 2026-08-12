@@ -34,6 +34,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from linkedinbot.adapters.reporting.filesystem_report_store import FilesystemReportStore
 from linkedinbot.db.models import AccountConfigProfileOrm, RunLogOrm, UserProfileOrm
@@ -122,6 +123,11 @@ def _valid_config_profile_data() -> dict:
             "department_confidence_tolerance": 0.05,
             "borderline_band_width": 5,
             "company_score_reevaluation_window_days": 30,
+            "linkedin_retry_attempts": 3,
+            "llm_retry_attempts": 3,
+            "retry_base_delay_ms": 500,
+            "retry_max_delay_ms": 8000,
+            "linkedin_consecutive_failure_threshold": 5,
         },
         "schedule": {"interval_days": 2, "jitter_minutes": 30},
         "collection_limits": {"max_jobs_per_run": 1},
@@ -167,13 +173,20 @@ class _FakeLinkedInPort(LinkedInPort):
     ham HTML karti listesini "pop" eder; liste tukenirse bos liste doner
     (dogal sayfalama sonu). `validate_error` verilirse `validate()` bunu
     firlatir (Session Validation basarisizligini simule etmek icin).
+    `search_error` verilirse (M9.4), `search_jobs_page()` HER cagrida bu
+    hatayi firlatir - devre kesicinin (Section 21) orkestrasyon-seviyesi
+    entegrasyonunu (Partial run_log) test etmek icin.
     """
 
     def __init__(
-        self, cards_by_call: list[list[str]], validate_error: Exception | None = None
+        self,
+        cards_by_call: list[list[str]],
+        validate_error: Exception | None = None,
+        search_error: Exception | None = None,
     ) -> None:
         self._cards_by_call = list(cards_by_call)
         self._validate_error = validate_error
+        self._search_error = search_error
         self.search_calls = 0
 
     def ensure_session(self, account_id: UUID) -> None:
@@ -187,6 +200,8 @@ class _FakeLinkedInPort(LinkedInPort):
         self, account_id: UUID, location: str, keywords: str, page: int
     ) -> list[str]:
         self.search_calls += 1
+        if self._search_error is not None:
+            raise self._search_error
         if self._cards_by_call:
             return self._cards_by_call.pop(0)
         return []
@@ -293,7 +308,12 @@ def test_first_run_creates_new_job_scores_report_and_success_run_log(
         account.account_id, dependencies, TriggerType.MANUAL, NOW, LOCK_DURATION, is_bootstrap=True
     )
 
-    assert result.status == RunStatus.SUCCESS
+    # `max_jobs_per_run=1` (test fixture, _valid_config_profile_data) cap'e
+    # tam bu tek kartla ulasilir - M9.4 "unified completeness" duzeltmesi
+    # geregi `collection_capped=True` HER ZAMAN `is_complete=False` anlamina
+    # gelir, dolayisiyla Run PARTIAL'dir (SUCCESS DEGIL).
+    assert result.status == RunStatus.PARTIAL
+    assert result.partial_reason is not None
     assert result.jobs_collected == 1
     assert result.jobs_filtered == 1
     assert result.jobs_new == 1
@@ -320,7 +340,7 @@ def test_first_run_creates_new_job_scores_report_and_success_run_log(
 
     run_log_row = dependencies.run_log_repository.get_by_id(account.account_id, result.run_id)
     assert run_log_row is not None
-    assert run_log_row.status == RunStatus.SUCCESS
+    assert run_log_row.status == RunStatus.PARTIAL
 
     report = dependencies.report_repository.get_by_run_id(account.account_id, result.run_id)
     assert report is not None
@@ -346,7 +366,12 @@ def test_job_missing_from_a_later_run_is_marked_closed(db_session: Session, acco
         LOCK_DURATION,
         is_bootstrap=True,
     )
-    assert first_result.status == RunStatus.SUCCESS
+    # Ilk calistirma, tek kartla max_jobs_per_run=1 cap'ine ulasir - M9.4
+    # "unified completeness" duzeltmesi geregi PARTIAL'dir. Ikinci
+    # calistirma (asagida) BOS bir sayfa doner - cap HIC vurulmaz, hicbir
+    # sorgu basarisiz olmaz - is_complete=True kalir, kapali-ilan tespiti
+    # normal sekilde calisir.
+    assert first_result.status == RunStatus.PARTIAL
     assert first_result.jobs_new == 1
 
     second_now = NOW + timedelta(days=2)
@@ -405,7 +430,8 @@ def test_a_seen_job_reappearing_in_top_matches_still_renders_a_company_score(
         LOCK_DURATION,
         is_bootstrap=True,
     )
-    assert first_result.status == RunStatus.SUCCESS
+    # max_jobs_per_run=1 cap'ine ilk kartla ulasilir - PARTIAL (M9.4).
+    assert first_result.status == RunStatus.PARTIAL
 
     # Ikinci calistirma AYNI karti (degismemis icerik) doner - ilan SEEN
     # olarak siniflandirilir ve wholesale yeniden kullanilir.
@@ -422,7 +448,8 @@ def test_a_seen_job_reappearing_in_top_matches_still_renders_a_company_score(
         is_bootstrap=False,
     )
 
-    assert second_result.status == RunStatus.SUCCESS
+    # Ayni sekilde cap'e ulasilir - PARTIAL (M9.4).
+    assert second_result.status == RunStatus.PARTIAL
     evaluated = second_run_dependencies.evaluated_job_repository.get_by_account_and_job(
         account.account_id, job_url
     )
@@ -464,6 +491,51 @@ def test_run_raises_when_the_account_is_already_locked(db_session: Session, acco
     assert dependencies.evaluated_job_repository.list_by_account(account.account_id) == []
     run_log_count = (
         db_session.query(RunLogOrm).filter(RunLogOrm.account_id == account.account_id).count()
+    )
+    assert run_log_count == 0
+
+
+def test_run_with_a_nonexistent_account_id_raises_a_clear_error_not_a_raw_fk_violation(
+    db_session: Session, tmp_path
+):
+    # Regression (independent review, Finding 1): RunLock.acquire() used to
+    # run BEFORE account-existence validation (load_account_context()).
+    # run_locks.account_id carries a FOREIGN KEY to accounts.account_id, so
+    # a nonexistent account_id made RunLock.acquire()'s own INSERT raise a
+    # raw, uncaught psycopg IntegrityError instead of the clean, already-
+    # established "Hesap bulunamadi" ValueError that load_account_context()
+    # (config/loader.py, M2.2, unchanged) is specifically designed to raise
+    # for exactly this case.
+    #
+    # Note: a Failed run_logs row cannot be written for a nonexistent
+    # account either - run_logs.account_id carries the SAME kind of FK
+    # (verified directly against SqlAlchemyRunLogRepository.create()) - so
+    # there is no valid account to record a "failed run" against in the
+    # first place. The fix's observable contract is therefore a clean,
+    # uncaught ValueError (same principle as RunAlreadyInProgressError's
+    # "hicbir is denenmedi" - nothing was attempted, so nothing is logged),
+    # not a persisted run_logs row.
+    nonexistent_account_id = uuid4()
+    dependencies = _make_dependencies(
+        db_session, tmp_path, _FakeLinkedInPort([]), _ScriptedLLMGateway()
+    )
+
+    with pytest.raises(ValueError, match="Hesap bulunamadi"):
+        orchestrator.run(
+            nonexistent_account_id,
+            dependencies,
+            TriggerType.MANUAL,
+            NOW,
+            LOCK_DURATION,
+            is_bootstrap=True,
+        )
+
+    # Ne run_locks ne de run_logs'a hicbir satir yazilmis olmamalidir - kilit
+    # hic alinmamis olmalidir (hesap gecersizken hicbir islem denenmemistir).
+    run_log_count = (
+        db_session.query(RunLogOrm)
+        .filter(RunLogOrm.account_id == nonexistent_account_id)
+        .count()
     )
     assert run_log_count == 0
 
@@ -573,7 +645,8 @@ def test_a_job_only_matching_the_department_confidence_tolerance_band_is_borderl
         account.account_id, dependencies, TriggerType.MANUAL, NOW, LOCK_DURATION, is_bootstrap=True
     )
 
-    assert result.status == RunStatus.SUCCESS
+    # max_jobs_per_run=1 cap'ine tek kartla ulasilir - PARTIAL (M9.4).
+    assert result.status == RunStatus.PARTIAL
     evaluated = dependencies.evaluated_job_repository.get_by_account_and_job(
         account.account_id, job_url
     )
@@ -581,6 +654,426 @@ def test_a_job_only_matching_the_department_confidence_tolerance_band_is_borderl
     assert evaluated.status == JobStatus.NEW
     assert evaluated.is_borderline is True
     assert evaluated.ai_match_score is not None
+
+
+def test_circuit_breaker_trip_during_collection_produces_a_partial_run_with_a_real_report(
+    db_session: Session, account, tmp_path
+):
+    # M9.4 uctan uca: devre kesici tetiklenince Orchestrator, PRD Section
+    # 15.7 geregi HALA gecerli bir rapor ureten, evaluated_jobs/reports/
+    # run_logs'u NORMAL sekilde commit eden bir Partial run_log doner -
+    # Failed run_log'un (tam rollback) AKSINE. `linkedin_retry_attempts=1`
+    # ve `linkedin_consecutive_failure_threshold=1`, tek sorgulu test
+    # fixture'inde (bkz. _valid_config_profile_data) devre kesicinin ILK
+    # cagrida, HICBIR gercek `time.sleep` olmadan tetiklenmesini saglar.
+    db_session.add(
+        UserProfileOrm(
+            account_id=account.account_id,
+            career_goals="Grow into a business development leadership role.",
+            skills_summary="Sales, account management, negotiation.",
+            preferences_dealbreakers={"excluded_companies": [], "excluded_job_ids": []},
+        )
+    )
+    config_data = _valid_config_profile_data()
+    config_data["thresholds"]["linkedin_retry_attempts"] = 1
+    config_data["thresholds"]["linkedin_consecutive_failure_threshold"] = 1
+    db_session.add(
+        AccountConfigProfileOrm(
+            account_id=account.account_id,
+            config_version=1,
+            is_active=True,
+            validated_at=NOW,
+            **config_data,
+        )
+    )
+    db_session.flush()
+
+    dependencies = _make_dependencies(
+        db_session,
+        tmp_path,
+        _FakeLinkedInPort([], search_error=RuntimeError("simulated LinkedIn outage")),
+        _ScriptedLLMGateway(),
+    )
+
+    result = orchestrator.run(
+        account.account_id, dependencies, TriggerType.MANUAL, NOW, LOCK_DURATION, is_bootstrap=True
+    )
+
+    assert result.status == RunStatus.PARTIAL
+    assert result.partial_reason is not None
+    assert result.jobs_collected == 0
+    assert result.error_detail is None  # error_detail Failed'e ozeldir (M9.4)
+
+    run_log_row = dependencies.run_log_repository.get_by_id(account.account_id, result.run_id)
+    assert run_log_row is not None
+    assert run_log_row.status == RunStatus.PARTIAL
+    assert run_log_row.partial_reason == result.partial_reason
+
+    report = dependencies.report_repository.get_by_run_id(account.account_id, result.run_id)
+    assert report is not None
+    assert report.storage_path.exists()
+
+
+def test_circuit_breaker_trip_does_not_falsely_close_previously_seen_jobs(
+    db_session: Session, account, tmp_path
+):
+    # Regression (self-review bulgusu, gercek defect): `diff_job_postings()`
+    # (M4.2, degistirilmemis) "current_scan'de gorunmeyen HER onceki ilan
+    # kapanmistir" varsayar - bu varsayim yalnizca TAM bir tarama icin
+    # gecerlidir. Devre kesici `raw_cards=[]` ile ERKEN donduginde, bu HIC
+    # BIR SEKILDE "butun onceden bilinen ilanlar artik kapali" anlamina
+    # GELMEZ - yalnizca bu calistirmada yeniden dogrulanamadiklari
+    # anlamina gelir. Duzeltme oncesi, TEK bir gecici LinkedIn kesintisi
+    # hesabin TUM acik ilanlarini yanlislikla Closed isaretleyip
+    # raporlardan sessizce dusururdu (FR-10 ihlali).
+    job_url, _company, card = _unique_job_and_card()
+    _seed_account_context(db_session, account.account_id)
+
+    first_run_dependencies = _make_dependencies(
+        db_session, tmp_path, _FakeLinkedInPort([[card]]), _ScriptedLLMGateway()
+    )
+    first_result = orchestrator.run(
+        account.account_id,
+        first_run_dependencies,
+        TriggerType.MANUAL,
+        NOW,
+        LOCK_DURATION,
+        is_bootstrap=True,
+    )
+    # max_jobs_per_run=1 cap'ine tek kartla ulasilir - PARTIAL (M9.4).
+    assert first_result.status == RunStatus.PARTIAL
+
+    config_row = (
+        db_session.query(AccountConfigProfileOrm)
+        .filter(
+            AccountConfigProfileOrm.account_id == account.account_id,
+            AccountConfigProfileOrm.is_active.is_(True),
+        )
+        .one()
+    )
+    config_row.thresholds = {
+        **config_row.thresholds,
+        "linkedin_retry_attempts": 1,
+        "linkedin_consecutive_failure_threshold": 1,
+    }
+    flag_modified(config_row, "thresholds")
+    db_session.flush()
+
+    second_now = NOW + timedelta(days=2)
+    second_run_dependencies = _make_dependencies(
+        db_session,
+        tmp_path,
+        _FakeLinkedInPort([], search_error=RuntimeError("simulated LinkedIn outage")),
+        _ScriptedLLMGateway(),
+    )
+    second_result = orchestrator.run(
+        account.account_id,
+        second_run_dependencies,
+        TriggerType.SCHEDULED,
+        second_now,
+        LOCK_DURATION,
+        is_bootstrap=False,
+    )
+
+    assert second_result.status == RunStatus.PARTIAL
+    assert second_result.jobs_closed == 0
+
+    evaluated = second_run_dependencies.evaluated_job_repository.get_by_account_and_job(
+        account.account_id, job_url
+    )
+    assert evaluated is not None
+    assert evaluated.status != JobStatus.CLOSED
+    assert evaluated.status == JobStatus.NEW
+
+
+def test_collection_capped_run_does_not_falsely_close_jobs_from_unreached_queries(
+    db_session: Session, account, tmp_path
+):
+    # Regression (independent review, Finding 1 follow-up): FR-21's own
+    # acceptance criterion frames a capped collection as "kesildi" (cut
+    # short) - textually the SAME kind of incomplete scan as a circuit-
+    # breaker trip, just via a DIFFERENT trigger. The is_partial-only
+    # guard added for the circuit-breaker case did NOT cover this path: a
+    # run that stops early because max_jobs_per_run (FR-21) was reached
+    # (status stays plain SUCCESS - not even Partial!) can silently mark
+    # a genuinely-still-open job Closed, simply because its query was
+    # never reached before the cap.
+    job_url_a, _company_a, card_a = _unique_job_and_card()
+    unique_b = uuid4().hex
+    job_url_b = f"https://www.linkedin.com/jobs/view/{unique_b}"
+    company_b = f"Other Corp {unique_b}"
+    card_b = f"""
+<div>
+  <div class="job-card-title">Marketing Specialist - Entry Level</div>
+  <div class="job-card-company">{company_b}</div>
+  <div class="job-card-location">Istanbul, Turkey</div>
+  <div class="job-card-date">2 days ago</div>
+  <div class="job-card-description">
+    Entry Level marketing role.
+  </div>
+  <a class="job-card-link" href="{job_url_b}">View</a>
+</div>
+"""
+    db_session.add(
+        UserProfileOrm(
+            account_id=account.account_id,
+            career_goals="Grow into a business development leadership role.",
+            skills_summary="Sales, account management, negotiation.",
+            preferences_dealbreakers={"excluded_companies": [], "excluded_job_ids": []},
+        )
+    )
+    config_data = _valid_config_profile_data()
+    # IKI departman sorgusu: cap ILK sorguda vurulunca IKINCI sorgu hic
+    # denenmeyecek - bu, bug'in gercek tetikleyicisidir.
+    config_data["target_criteria"]["departments"] = {
+        "Sales & Business Development": ["Sales Executive"],
+        "Marketing": ["Marketing Specialist"],
+    }
+    config_data["collection_limits"]["max_jobs_per_run"] = 200
+    db_session.add(
+        AccountConfigProfileOrm(
+            account_id=account.account_id,
+            config_version=1,
+            is_active=True,
+            validated_at=NOW,
+            **config_data,
+        )
+    )
+    db_session.flush()
+
+    # Run 1: cap yuksek (200) - her iki sorgu da dogal olarak tukenir, her
+    # iki ilan da olusturulur. Bos sayfa listeleri, her sorgunun kendi
+    # dogal sayfalama sonunu temsil eder (bkz. _FakeLinkedInPort - sirali
+    # bir kuyruktan "pop" eder, sorgudan BAGIMSIZ).
+    first_run_dependencies = _make_dependencies(
+        db_session,
+        tmp_path,
+        _FakeLinkedInPort([[card_a], [], [card_b], []]),
+        _ScriptedLLMGateway(),
+    )
+    first_result = orchestrator.run(
+        account.account_id,
+        first_run_dependencies,
+        TriggerType.MANUAL,
+        NOW,
+        LOCK_DURATION,
+        is_bootstrap=True,
+    )
+    assert first_result.status == RunStatus.SUCCESS
+    assert first_result.jobs_new == 2
+
+    # Cap'i dusur - Sales sorgusunun ILK karti cap'e ulasir, Marketing
+    # sorgusu bu calistirmada HIC denenmez.
+    config_row = (
+        db_session.query(AccountConfigProfileOrm)
+        .filter(
+            AccountConfigProfileOrm.account_id == account.account_id,
+            AccountConfigProfileOrm.is_active.is_(True),
+        )
+        .one()
+    )
+    config_row.collection_limits = {**config_row.collection_limits, "max_jobs_per_run": 1}
+    flag_modified(config_row, "collection_limits")
+    db_session.flush()
+
+    second_now = NOW + timedelta(days=2)
+    second_run_dependencies = _make_dependencies(
+        db_session, tmp_path, _FakeLinkedInPort([[card_a]]), _ScriptedLLMGateway()
+    )
+    second_result = orchestrator.run(
+        account.account_id,
+        second_run_dependencies,
+        TriggerType.SCHEDULED,
+        second_now,
+        LOCK_DURATION,
+        is_bootstrap=False,
+    )
+
+    # M9.4 "unified completeness" duzeltmesi: `collection_capped=True` ARTIK
+    # HER ZAMAN `is_complete=False` (dolayisiyla Run PARTIAL) anlamina
+    # gelir - onceki tasarimda (bu regresyonun asil bulundugu round) capped
+    # bir calistirma yanlislikla plain SUCCESS kaliyordu.
+    assert second_result.status == RunStatus.PARTIAL
+    assert second_result.partial_reason is not None
+    assert second_result.collection_capped is True
+    assert second_result.jobs_closed == 0
+
+    evaluated_b = second_run_dependencies.evaluated_job_repository.get_by_account_and_job(
+        account.account_id, job_url_b
+    )
+    assert evaluated_b is not None
+    assert evaluated_b.status != JobStatus.CLOSED
+    assert evaluated_b.status == JobStatus.NEW
+
+
+class _QueryAwareLinkedInPort(LinkedInPort):
+    """`_FakeLinkedInPort` (bu dosyanin ana sahtesi) cagri-SIRASI ile
+    anahtarlanir ve `search_error` TUM cagrilara uygulanir - bu, TEK bir
+    sorgunun basarisiz olup DIGERININ basarili olmasi gereken bir
+    senaryoyu (asagidaki test) modelleyemez. Bu sahte, `(location,
+    keywords)` cifti ile anahtarlanir - unit seviyesindeki
+    `tests/unit/collection/test_collector.py::_FakeLinkedInPort`'un
+    sorgu-anahtarli deseniyle AYNI fikir, ama entegrasyon testinin kendi
+    ihtiyaci icin (bu dosyanin konvansiyonuyla tutarli, dosyalar arasi
+    sahte PAYLASILMAZ) burada YEREL olarak tanimlanir.
+    """
+
+    def __init__(
+        self,
+        cards_by_query: dict[tuple[str, str], list[list[str]]],
+        always_fail_queries: frozenset[tuple[str, str]],
+    ) -> None:
+        self._cards_by_query = {k: list(v) for k, v in cards_by_query.items()}
+        self._always_fail_queries = always_fail_queries
+        self.queries_attempted: set[tuple[str, str]] = set()
+
+    def ensure_session(self, account_id: UUID) -> None:
+        raise NotImplementedError
+
+    def validate(self, account_id: UUID) -> None:
+        pass
+
+    def search_jobs_page(
+        self, account_id: UUID, location: str, keywords: str, page: int
+    ) -> list[str]:
+        key = (location, keywords)
+        self.queries_attempted.add(key)
+        if key in self._always_fail_queries:
+            raise RuntimeError("simulated transient LinkedIn failure for this query")
+        pages = self._cards_by_query.get(key, [])
+        return pages[page] if page < len(pages) else []
+
+
+def test_query_retry_exhaustion_below_circuit_breaker_threshold_does_not_falsely_close_jobs(
+    db_session: Session, account, tmp_path
+):
+    # Regression (independent review, THIRD production bug found - root
+    # cause of the M9.4 "unified completeness" redesign): a query whose
+    # page ALWAYS fails exhausts ALL of its retry attempts, but if the
+    # resulting consecutive-failure count stays BELOW
+    # `linkedin_consecutive_failure_threshold`, the circuit breaker never
+    # trips - collection treats it as "failed but continue" (identical to
+    # a natural empty-page ending) and moves on to the next query. Before
+    # the "unified completeness" redesign, this left ZERO trace in the
+    # final CollectionResult: neither `is_partial` nor `collection_capped`
+    # became True, so the closed-job-detection guard never engaged and a
+    # genuinely-still-open job (whose ONLY query failed this run) was
+    # silently marked Closed - with the run reporting plain SUCCESS, no
+    # signal anything went wrong at all.
+    job_url_a, _company_a, card_a = _unique_job_and_card()
+    unique_b = uuid4().hex
+    job_url_b = f"https://www.linkedin.com/jobs/view/{unique_b}"
+    company_b = f"Other Corp {unique_b}"
+    card_b = f"""
+<div>
+  <div class="job-card-title">Marketing Specialist - Entry Level</div>
+  <div class="job-card-company">{company_b}</div>
+  <div class="job-card-location">Istanbul, Turkey</div>
+  <div class="job-card-date">2 days ago</div>
+  <div class="job-card-description">
+    Entry Level marketing role.
+  </div>
+  <a class="job-card-link" href="{job_url_b}">View</a>
+</div>
+"""
+    db_session.add(
+        UserProfileOrm(
+            account_id=account.account_id,
+            career_goals="Grow into a business development leadership role.",
+            skills_summary="Sales, account management, negotiation.",
+            preferences_dealbreakers={"excluded_companies": [], "excluded_job_ids": []},
+        )
+    )
+    config_data = _valid_config_profile_data()
+    # IKI departman sorgusu: Run 2'de Sales sorgusu TAMAMEN basarisiz
+    # olacak, Marketing sorgusu basarili kalacak.
+    config_data["target_criteria"]["departments"] = {
+        "Sales & Business Development": ["Sales Executive"],
+        "Marketing": ["Marketing Specialist"],
+    }
+    config_data["collection_limits"]["max_jobs_per_run"] = 200
+    db_session.add(
+        AccountConfigProfileOrm(
+            account_id=account.account_id,
+            config_version=1,
+            is_active=True,
+            validated_at=NOW,
+            **config_data,
+        )
+    )
+    db_session.flush()
+
+    # Run 1: her iki sorgu da dogal olarak tukenir, her iki ilan da
+    # olusturulur (bu ilerideki Sales ilaninin YANLISLIKLA kapanmadigini
+    # dogrulamak icin bir "onceden acik" durumu kurar).
+    first_run_dependencies = _make_dependencies(
+        db_session,
+        tmp_path,
+        _FakeLinkedInPort([[card_a], [], [card_b], []]),
+        _ScriptedLLMGateway(),
+    )
+    first_result = orchestrator.run(
+        account.account_id,
+        first_run_dependencies,
+        TriggerType.MANUAL,
+        NOW,
+        LOCK_DURATION,
+        is_bootstrap=True,
+    )
+    assert first_result.status == RunStatus.SUCCESS
+    assert first_result.jobs_new == 2
+
+    # Run 2: Sales sorgusu HER ZAMAN basarisiz olur (`linkedin_retry_attempts=1`
+    # ile TEK denemede tukenir, gercek sleep olmadan) - ama devre kesici
+    # esigi (5, fixture varsayilani, DEGISTIRILMEDI) TEK bir basarisiz
+    # sorguyla ASILMAZ, dolayisiyla devre kesici HIC TETIKLENMEZ. Marketing
+    # sorgusu normal sekilde calisir ve basarili olur.
+    config_row = (
+        db_session.query(AccountConfigProfileOrm)
+        .filter(
+            AccountConfigProfileOrm.account_id == account.account_id,
+            AccountConfigProfileOrm.is_active.is_(True),
+        )
+        .one()
+    )
+    config_row.thresholds = {**config_row.thresholds, "linkedin_retry_attempts": 1}
+    flag_modified(config_row, "thresholds")
+    db_session.flush()
+
+    second_now = NOW + timedelta(days=2)
+    second_port = _QueryAwareLinkedInPort(
+        cards_by_query={("Istanbul", '"Marketing Specialist"'): [[card_b], []]},
+        always_fail_queries=frozenset({("Istanbul", '"Sales Executive"')}),
+    )
+    second_run_dependencies = _make_dependencies(
+        db_session, tmp_path, second_port, _ScriptedLLMGateway()
+    )
+    second_result = orchestrator.run(
+        account.account_id,
+        second_run_dependencies,
+        TriggerType.SCHEDULED,
+        second_now,
+        LOCK_DURATION,
+        is_bootstrap=False,
+    )
+
+    # Devre kesici tetiklenmedi (breaker esigi asilmadi) VE cap'e ulasilmadi
+    # (max_jobs_per_run=200) - ama Sales sorgusu HICBIR ZAMAN basariyla
+    # taranamadigi icin Run yine de PARTIAL'dir ("unified completeness").
+    assert second_result.status == RunStatus.PARTIAL
+    assert second_result.partial_reason is not None
+    assert second_result.collection_capped is False
+    assert second_result.jobs_closed == 0
+    # Marketing sorgusu, Sales'in basarisizligindan BAGIMSIZ olarak yine
+    # de denendi (devre kesici tetiklenmedigi icin toplama DEVAM ETTI).
+    assert ("Istanbul", '"Marketing Specialist"') in second_port.queries_attempted
+
+    evaluated_a = second_run_dependencies.evaluated_job_repository.get_by_account_and_job(
+        account.account_id, job_url_a
+    )
+    assert evaluated_a is not None
+    assert evaluated_a.status != JobStatus.CLOSED
+    assert evaluated_a.status == JobStatus.NEW
 
 
 def test_blacklisted_company_is_excluded_without_scoring(db_session: Session, account, tmp_path):
@@ -619,7 +1112,8 @@ def test_blacklisted_company_is_excluded_without_scoring(db_session: Session, ac
         account.account_id, dependencies, TriggerType.MANUAL, NOW, LOCK_DURATION, is_bootstrap=True
     )
 
-    assert result.status == RunStatus.SUCCESS
+    # max_jobs_per_run=1 cap'ine tek kartla ulasilir - PARTIAL (M9.4).
+    assert result.status == RunStatus.PARTIAL
     assert result.jobs_filtered == 0
 
     evaluated = dependencies.evaluated_job_repository.get_by_account_and_job(

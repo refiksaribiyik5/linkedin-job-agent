@@ -150,6 +150,22 @@ class Thresholds(BaseModel):
     confidence 0-1 olceklidir. Somut varsayilan deger burada
     SABITLENMEZ (bkz. Roadmap amendment metni); `system.defaults.yaml`
     bu alan icin ayri bir varsayilan deger tasir.
+
+    Bes retry/devre-kesici alani (Roadmap M2.1 duzeltmesi, M9.4 "Hata
+    Siniflandirma + Retry"): TDD Section 21 bu parametreler icin
+    yalnizca ORNEK degerler verir ("orn. 3") - NFR-6/FR-13 geregi
+    hicbiri kod icine sabitlenemez. `linkedin_retry_attempts`/
+    `llm_retry_attempts`, `retry/retry.py`'nin `retry_with_backoff()`'una
+    (henuz insa edilmemis, M9.4) sirasiyla `collection/collector.py` ve
+    `adapters/llm/anthropic_adapter.py` cagri noktalarindan gecirilir.
+    `retry_base_delay_ms`/`retry_max_delay_ms`, HER IKI cagri turu
+    arasinda PAYLASILAN (ayri degil) ustel geri cekilme zamanlamasi
+    parametreleridir - Roadmap'in kendi onayladigi alan listesi boyle
+    tanimlar. `linkedin_consecutive_failure_threshold`, yalnizca
+    LinkedIn toplama asamasindaki devre kesici (circuit-breaker-lite,
+    Section 21) icindir - LLM tarafinda ayri bir devre kesici Section
+    21'de tanimli DEGILDIR (M9.4 tasarim notu). Somut varsayilan
+    degerler burada SABITLENMEZ; `system.defaults.yaml` tasir.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -160,6 +176,11 @@ class Thresholds(BaseModel):
     department_confidence_tolerance: float = Field(ge=0, le=1)
     borderline_band_width: float = Field(ge=0)
     company_score_reevaluation_window_days: int = Field(gt=0)
+    linkedin_retry_attempts: int = Field(ge=1)
+    llm_retry_attempts: int = Field(ge=1)
+    retry_base_delay_ms: int = Field(gt=0)
+    retry_max_delay_ms: int = Field(gt=0)
+    linkedin_consecutive_failure_threshold: int = Field(ge=1)
 
 
 class Schedule(BaseModel):

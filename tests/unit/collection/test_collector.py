@@ -74,10 +74,24 @@ class _FakeLinkedInPort(LinkedInPort):
     eslemesine gore ham kart listeleri doner. Tanimlanmamis bir sorgu veya
     `len(pages)` disindaki bir sayfa istegi bos liste (dogal sayfalama
     sonu) doner.
+
+    `failures_before_success_by_query` (M9.4 eklentisi): verilen sorgu icin
+    HER cagrida, sayac sifira inene kadar bir `RuntimeError` firlatir (retry
+    mekanizmasini test etmek icin - collector.py bunu `TransientError`'e
+    cevirip `retry_with_backoff()` araciligiyla yeniden dener). `always_fail_queries`
+    ise o sorgu icin HER ZAMAN (retry tukeninceye kadar da) basarisiz olur -
+    devre kesici senaryolarini test etmek icin.
     """
 
-    def __init__(self, pages_by_query: dict[tuple[str, str], list[list[str]]] | None = None):
+    def __init__(
+        self,
+        pages_by_query: dict[tuple[str, str], list[list[str]]] | None = None,
+        failures_before_success_by_query: dict[tuple[str, str], int] | None = None,
+        always_fail_queries: frozenset[tuple[str, str]] = frozenset(),
+    ):
         self._pages_by_query = pages_by_query or {}
+        self._failures_before_success_by_query = dict(failures_before_success_by_query or {})
+        self._always_fail_queries = always_fail_queries
         self.calls: list[tuple[UUID, str, str, int]] = []
 
     def ensure_session(self, account_id: UUID) -> None:
@@ -90,7 +104,14 @@ class _FakeLinkedInPort(LinkedInPort):
         self, account_id: UUID, location: str, keywords: str, page: int
     ) -> list[str]:
         self.calls.append((account_id, location, keywords, page))
-        pages = self._pages_by_query.get((location, keywords))
+        query = (location, keywords)
+        if query in self._always_fail_queries:
+            raise RuntimeError("simulated persistent LinkedIn failure")
+        remaining_failures = self._failures_before_success_by_query.get(query, 0)
+        if remaining_failures > 0:
+            self._failures_before_success_by_query[query] = remaining_failures - 1
+            raise RuntimeError("simulated transient LinkedIn failure")
+        pages = self._pages_by_query.get(query)
         if pages is None or page >= len(pages):
             return []
         return pages[page]
@@ -124,6 +145,10 @@ def test_collect_raw_job_cards_builds_one_query_per_cluster_per_location():
         max_jobs_per_run=200,
         delay_seconds=0.0,
         jitter_seconds=0.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=_no_op_sleep,
     )
 
@@ -149,6 +174,10 @@ def test_collect_raw_job_cards_keywords_are_quoted_and_or_joined():
         max_jobs_per_run=200,
         delay_seconds=0.0,
         jitter_seconds=0.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=_no_op_sleep,
     )
 
@@ -168,18 +197,24 @@ def test_collect_raw_job_cards_paginates_within_a_query_until_empty_page():
         }
     )
 
-    raw_cards, collection_capped = collect_raw_job_cards(
+    result = collect_raw_job_cards(
         port,
         ACCOUNT_ID,
         target_criteria,
         max_jobs_per_run=200,
         delay_seconds=0.0,
         jitter_seconds=0.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=_no_op_sleep,
     )
 
-    assert raw_cards == ["card-0-a", "card-0-b", "card-1-a"]
-    assert collection_capped is False
+    assert result.raw_cards == ["card-0-a", "card-0-b", "card-1-a"]
+    assert result.collection_capped is False
+    assert result.is_complete is True
+    assert result.partial_reason is None
     pages_requested = [page for _acc, _loc, _kw, page in port.calls]
     assert pages_requested == [0, 1, 2]
 
@@ -194,20 +229,29 @@ def test_collect_raw_job_cards_stops_exactly_at_cap_mid_page():
         }
     )
 
-    raw_cards, collection_capped = collect_raw_job_cards(
+    result = collect_raw_job_cards(
         port,
         ACCOUNT_ID,
         target_criteria,
         max_jobs_per_run=3,
         delay_seconds=0.0,
         jitter_seconds=0.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=_no_op_sleep,
     )
 
     # Roadmap M3.3 "Tamamlanma Dogrulamasi": "tam olarak <=5 sonuc" -
     # sinira ulasildiginda sayfanin geri kalani dahil edilmemelidir.
-    assert raw_cards == ["card-1", "card-2", "card-3"]
-    assert collection_capped is True
+    assert result.raw_cards == ["card-1", "card-2", "card-3"]
+    assert result.collection_capped is True
+    # M9.4 duzeltmesi (independent review, "unified completeness"): FR-21
+    # bir capped calistirmayi acikca "kesildi" olarak tanimlar - bu, TAM
+    # bir tarama DEGILDIR (kalan kartlar/sorgular hic denenmedi).
+    assert result.is_complete is False
+    assert result.partial_reason is not None
 
 
 def test_collect_raw_job_cards_does_not_query_further_once_capped():
@@ -224,18 +268,23 @@ def test_collect_raw_job_cards_does_not_query_further_once_capped():
         }
     )
 
-    raw_cards, collection_capped = collect_raw_job_cards(
+    result = collect_raw_job_cards(
         port,
         ACCOUNT_ID,
         target_criteria,
         max_jobs_per_run=2,
         delay_seconds=0.0,
         jitter_seconds=0.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=_no_op_sleep,
     )
 
-    assert raw_cards == ["card-1", "card-2"]
-    assert collection_capped is True
+    assert result.raw_cards == ["card-1", "card-2"]
+    assert result.collection_capped is True
+    assert result.is_complete is False
     # Sinira ilk sorguda ulasildigi icin ikinci departmanin sorgusu HIC
     # yapilmamali - FR-21'in "toplamayi durdurur" gereksinimi.
     assert all(keywords == '"Sales"' for _acc, _loc, keywords, _page in port.calls)
@@ -249,18 +298,22 @@ def test_collect_raw_job_cards_not_capped_when_naturally_exhausted_below_cap():
         }
     )
 
-    raw_cards, collection_capped = collect_raw_job_cards(
+    result = collect_raw_job_cards(
         port,
         ACCOUNT_ID,
         target_criteria,
         max_jobs_per_run=200,
         delay_seconds=0.0,
         jitter_seconds=0.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=_no_op_sleep,
     )
 
-    assert raw_cards == ["card-1", "card-2"]
-    assert collection_capped is False
+    assert result.raw_cards == ["card-1", "card-2"]
+    assert result.collection_capped is False
 
 
 def test_collect_raw_job_cards_passes_account_id_through():
@@ -274,6 +327,10 @@ def test_collect_raw_job_cards_passes_account_id_through():
         max_jobs_per_run=200,
         delay_seconds=0.0,
         jitter_seconds=0.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=_no_op_sleep,
     )
 
@@ -282,21 +339,35 @@ def test_collect_raw_job_cards_passes_account_id_through():
 
 def test_collect_raw_job_cards_propagates_session_invalid_error():
     class _RaisingPort(_FakeLinkedInPort):
+        def __init__(self):
+            super().__init__()
+            self.raise_count = 0
+
         def search_jobs_page(self, account_id, location, keywords, page):
+            self.raise_count += 1
             raise SessionInvalidError("oturum gecersiz")
 
     target_criteria = _target_criteria()
+    port = _RaisingPort()
 
     with pytest.raises(SessionInvalidError):
         collect_raw_job_cards(
-            _RaisingPort(),
+            port,
             ACCOUNT_ID,
             target_criteria,
             max_jobs_per_run=200,
             delay_seconds=0.0,
             jitter_seconds=0.0,
+            linkedin_retry_attempts=3,
+            retry_base_delay_ms=0,
+            retry_max_delay_ms=0,
+            linkedin_consecutive_failure_threshold=5,
             sleep=_no_op_sleep,
         )
+
+    # M9.4: SessionInvalidError PermanentError'dir - retry_with_backoff()
+    # tarafindan HIC yakalanmaz, ilk cagrida derhal yukari sizar.
+    assert port.raise_count == 1
 
 
 def test_collect_raw_job_cards_zero_cap_collects_nothing_and_is_capped():
@@ -310,19 +381,199 @@ def test_collect_raw_job_cards_zero_cap_collects_nothing_and_is_capped():
         pages_by_query={("Istanbul", '"Sales" OR "Sales Executive"'): [["card-1"]]}
     )
 
-    raw_cards, collection_capped = collect_raw_job_cards(
+    result = collect_raw_job_cards(
         port,
         ACCOUNT_ID,
         target_criteria,
         max_jobs_per_run=0,
         delay_seconds=0.0,
         jitter_seconds=0.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=_no_op_sleep,
     )
 
-    assert raw_cards == []
-    assert collection_capped is True
+    assert result.raw_cards == []
+    assert result.collection_capped is True
+    assert result.is_complete is False
     assert port.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Retry + Devre Kesici (Roadmap M9.4, TDD Section 21) - her sayfa/sorgu
+# istegi, `TransientError`e cevrilen bir hata alirsa `retry_with_backoff()`
+# (retry.py) araciligiyla yeniden denenir. Butun denemeler bir sorgu icin
+# tukenirse (ama devre kesici ESIGI henuz asilmadiysa) o sorgu "basarisiz
+# ama devam et" olarak ele alinir - dogal bos-sayfa sonlanmasi gibi toplamaya
+# DEVAM EDILIR, ama bu sorgu HIC BASARIYLA taranamadigi icin artik tarama
+# TAM (complete) sayilmaz: `CollectionResult.is_complete=False` doner (bagimsiz
+# review, "unified completeness" duzeltmesi). Ardisik boyle basarisizliklarin
+# sayisi `linkedin_consecutive_failure_threshold`'u asarsa, toplama HEMEN
+# durur ve yine `is_complete=False` doner - her iki durumda da
+# `RunOrchestrator`'in (M9.3) Run'i "Partial" isaretlemesi icin.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_raw_job_cards_retries_a_transient_failure_and_recovers():
+    target_criteria = _target_criteria()
+    query = ("Istanbul", '"Sales" OR "Sales Executive"')
+    port = _FakeLinkedInPort(
+        pages_by_query={query: [["card-1"]]},
+        failures_before_success_by_query={query: 2},
+    )
+    sleep = _recording_sleep()
+
+    result = collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=10,
+        retry_max_delay_ms=100,
+        linkedin_consecutive_failure_threshold=5,
+        sleep=sleep,
+    )
+
+    # 2 basarisizlik + 1 basari = sayfa 0 icin 3 cagri, sonra sayfa 1
+    # (dogal bos sayfa) icin 1 cagri daha = toplam 4.
+    assert result.raw_cards == ["card-1"]
+    assert result.is_complete is True
+    assert len(sleep.calls) >= 2  # en az iki geri cekilme beklemesi
+
+
+def test_collect_raw_job_cards_exhausted_retries_below_threshold_continue_as_failed_but_continue():
+    # Bir sorgunun TUM denemeleri tukenir (her zaman basarisiz olur), ama
+    # devre kesici esigi (3) henuz asilmaz (yalnizca 1 ardisik basarisizlik) -
+    # bu sorgu dogal bos-sayfa sonlanmasi gibi ele alinir, toplama DEVAM EDER
+    # (Marketing sorgusu yine de calisir). AMA Sales sorgusu HIC BASARIYLA
+    # taranamadigi icin (bagimsiz review, "unified completeness" duzeltmesi -
+    # eski `is_partial`/`collection_capped` cifti bu durumda HICBIRINI True
+    # yapmiyordu ve sessizce izsiz kaliyordu) toplam artik TAM sayilmaz.
+    target_criteria = _target_criteria(
+        departments={
+            "Sales & Business Development": ["Sales"],
+            "Marketing": ["Marketing"],
+        }
+    )
+    port = _FakeLinkedInPort(
+        pages_by_query={("Istanbul", '"Marketing"'): [["card-marketing"]]},
+        always_fail_queries=frozenset({("Istanbul", '"Sales"')}),
+    )
+    sleep = _recording_sleep()
+
+    result = collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        linkedin_retry_attempts=2,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=3,
+        sleep=sleep,
+    )
+
+    assert result.is_complete is False
+    assert result.partial_reason is not None
+    # Sales sorgusu tamamen basarisiz oldu ama ikinci (Marketing) sorgusu
+    # yine de calistirildi ve karti toplandi.
+    assert result.raw_cards == ["card-marketing"]
+
+
+def test_collect_raw_job_cards_trips_circuit_breaker_and_returns_partial():
+    target_criteria = _target_criteria(
+        departments={
+            "Sales & Business Development": ["Sales"],
+            "Marketing": ["Marketing"],
+            "Consulting": ["Consulting"],
+        }
+    )
+    port = _FakeLinkedInPort(
+        always_fail_queries=frozenset(
+            {
+                ("Istanbul", '"Sales"'),
+                ("Istanbul", '"Marketing"'),
+            }
+        ),
+        pages_by_query={("Istanbul", '"Consulting"'): [["card-consulting"]]},
+    )
+    sleep = _recording_sleep()
+
+    result = collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        linkedin_retry_attempts=1,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=2,
+        sleep=sleep,
+    )
+
+    # Sales basarisiz (1. ardisik), Marketing basarisiz (2. ardisik ->
+    # esik asildi) - toplama HEMEN durur, Consulting sorgusu HIC calismaz.
+    assert result.is_complete is False
+    assert result.partial_reason is not None
+    assert "2" in result.partial_reason
+    assert result.raw_cards == []
+    queries_attempted = {(location, keywords) for _acc, location, keywords, _page in port.calls}
+    assert ("Istanbul", '"Consulting"') not in queries_attempted
+
+
+def test_collect_raw_job_cards_a_successful_request_resets_the_consecutive_failure_counter():
+    # Devre kesici SADECE ARDISIK basarisizliklari sayar - Sales basarisiz
+    # olur (1. ardisik), Marketing basarili olur (sayac SIFIRLANIR),
+    # Consulting basarisiz olur (yeniden 1. ardisik, esik 2'yi GECMEZ) -
+    # devre kesici HIC TETIKLENMEZ, UC sorgu da denenir (port.calls ile
+    # asagida dogrulanir). Ama Sales VE Consulting sorgularinin HER IKISI
+    # de basarisiz oldugu icin (bagimsiz review, "unified completeness"
+    # duzeltmesi) toplam artik TAM sayilmaz.
+    target_criteria = _target_criteria(
+        departments={
+            "Sales & Business Development": ["Sales"],
+            "Marketing": ["Marketing"],
+            "Consulting": ["Consulting"],
+        }
+    )
+    port = _FakeLinkedInPort(
+        always_fail_queries=frozenset(
+            {
+                ("Istanbul", '"Sales"'),
+                ("Istanbul", '"Consulting"'),
+            }
+        ),
+        pages_by_query={("Istanbul", '"Marketing"'): [["card-marketing"]]},
+    )
+    sleep = _recording_sleep()
+
+    result = collect_raw_job_cards(
+        port,
+        ACCOUNT_ID,
+        target_criteria,
+        max_jobs_per_run=200,
+        delay_seconds=0.0,
+        jitter_seconds=0.0,
+        linkedin_retry_attempts=1,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=2,
+        sleep=sleep,
+    )
+
+    assert result.is_complete is False
+    assert result.raw_cards == ["card-marketing"]
+    queries_attempted = {(location, keywords) for _acc, location, keywords, _page in port.calls}
+    assert ("Istanbul", '"Consulting"') in queries_attempted
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +759,10 @@ def test_collect_raw_job_cards_does_not_delay_before_the_first_request():
         max_jobs_per_run=200,
         delay_seconds=3.0,
         jitter_seconds=1.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=sleep,
     )
 
@@ -533,6 +788,10 @@ def test_collect_raw_job_cards_delays_between_subsequent_requests():
         max_jobs_per_run=200,
         delay_seconds=3.0,
         jitter_seconds=1.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=sleep,
     )
 
@@ -560,6 +819,10 @@ def test_collect_raw_job_cards_delays_between_pages_of_the_same_query():
         max_jobs_per_run=200,
         delay_seconds=3.0,
         jitter_seconds=1.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=sleep,
     )
 
@@ -588,6 +851,10 @@ def test_collect_raw_job_cards_delay_is_within_configured_jitter_range():
         max_jobs_per_run=200,
         delay_seconds=3.0,
         jitter_seconds=1.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=sleep,
     )
 
@@ -613,6 +880,10 @@ def test_collect_raw_job_cards_delay_never_negative_when_jitter_exceeds_delay():
         max_jobs_per_run=200,
         delay_seconds=0.5,
         jitter_seconds=5.0,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
         sleep=sleep,
     )
 
@@ -645,6 +916,10 @@ def test_collect_raw_job_cards_default_sleep_measures_real_elapsed_time():
         max_jobs_per_run=200,
         delay_seconds=0.05,
         jitter_seconds=0.01,
+        linkedin_retry_attempts=3,
+        retry_base_delay_ms=0,
+        retry_max_delay_ms=0,
+        linkedin_consecutive_failure_threshold=5,
     )
     elapsed = time.monotonic() - start
 

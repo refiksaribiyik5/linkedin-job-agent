@@ -25,6 +25,7 @@ def _to_domain(orm_run_log: RunLogOrm) -> RunLog:
         jobs_closed=orm_run_log.jobs_closed,
         status=orm_run_log.status,
         error_detail=orm_run_log.error_detail,
+        partial_reason=orm_run_log.partial_reason,
         collection_capped=orm_run_log.collection_capped,
     )
 
@@ -51,6 +52,7 @@ class SqlAlchemyRunLogRepository(RunLogRepositoryPort):
             jobs_closed=run_log.jobs_closed,
             status=run_log.status,
             error_detail=run_log.error_detail,
+            partial_reason=run_log.partial_reason,
             collection_capped=run_log.collection_capped,
         )
         self._session.add(orm_run_log)

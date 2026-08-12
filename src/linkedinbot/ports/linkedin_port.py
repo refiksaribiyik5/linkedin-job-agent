@@ -19,11 +19,12 @@ eklenir - kalici bir oturumun HALA gecerli olup olmadigini (sunucu
 tarafinda suresi dolmus mu) canli olarak kontrol eder. Gecersiz bir
 oturum `SessionInvalidError` firlatir; TDD Section 20'nin hata
 taksonomisinde bu bir `PermanentError` olarak siniflandirilir (retry
-edilmez) - ama o merkezi taksonomi sinifi (`PermanentError` temel
-sinifi) henuz insa edilmemistir (Roadmap M9.3, "Hata Siniflandirma +
-Retry"); bu yuzden `SessionInvalidError` simdilik bagimsiz, kendi
-basina bir exception olarak tanimlanir, var olmayan bir taksonomi
-sinifindan miras almaz.
+edilmez) - `SessionInvalidError` artik `errors.PermanentError`'dan
+turer (Roadmap M9.4, "Hata Siniflandirma + Retry" - bu dosyanin kendi
+onceki notunun ONGORDUGU adim). Bu, `collection/collector.py`'nin
+(M9.4) LinkedIn cagri noktasindaki `retry_with_backoff()` sarmalayicisi
+icin dogrudan islevseldir: bir oturum hatasi asla yeniden denenmez,
+DERHAL yukari sizar.
 
 M3.3 KAPSAMI (Roadmap "Arama & Sayfalama", FR-21): Port'a
 `search_jobs_page()` eklenir - verilen bir (location, keywords, page)
@@ -44,13 +45,16 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from uuid import UUID
 
+from linkedinbot.errors import PermanentError
 
-class SessionInvalidError(Exception):
+
+class SessionInvalidError(PermanentError):
     """Verilen hesap icin kalici bir LinkedIn oturumu yoktur veya artik
     LinkedIn tarafindan kabul edilmiyor (FR-1). `LinkedInPort.validate()`
-    tarafindan firlatilir; genel bir crash degil, cagiranin (ileride Run
-    Orchestrator, M9) ayirt edip Run'i "Failed" olarak isaretleyebilecegi
-    tanimli bir hata turudur (bkz. TDD Section 9/20).
+    tarafindan firlatilir; genel bir crash degil, cagiranin (Run
+    Orchestrator, M9.3) ayirt edip Run'i "Failed" olarak isaretledigi
+    tanimli bir hata turudur (bkz. TDD Section 9/20). `PermanentError`'dan
+    turer (M9.4) - retry mekanizmasina HICBIR ZAMAN girmez.
     """
 
 

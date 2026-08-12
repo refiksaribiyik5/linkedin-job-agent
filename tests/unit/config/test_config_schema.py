@@ -52,6 +52,11 @@ def _valid_data() -> dict:
             "department_confidence_tolerance": 0.05,
             "borderline_band_width": 5,
             "company_score_reevaluation_window_days": 30,
+            "linkedin_retry_attempts": 3,
+            "llm_retry_attempts": 3,
+            "retry_base_delay_ms": 500,
+            "retry_max_delay_ms": 8000,
+            "linkedin_consecutive_failure_threshold": 5,
         },
         "schedule": {"interval_days": 2, "jitter_minutes": 30},
         "collection_limits": {"max_jobs_per_run": 200},
@@ -127,6 +132,11 @@ def test_unrecognized_nested_key_is_rejected():
         ("department_confidence_tolerance", 1.01),
         ("borderline_band_width", -1),
         ("company_score_reevaluation_window_days", 0),
+        ("linkedin_retry_attempts", 0),
+        ("llm_retry_attempts", 0),
+        ("retry_base_delay_ms", 0),
+        ("retry_max_delay_ms", 0),
+        ("linkedin_consecutive_failure_threshold", 0),
     ],
 )
 def test_threshold_out_of_range_raises_validation_error(field, value):

@@ -89,6 +89,29 @@ def test_get_by_id_returns_none_when_not_found(db_session: Session, account: Acc
     assert repo.get_by_id(account.account_id, uuid4()) is None
 
 
+def test_create_and_get_by_id_round_trips_partial_reason(
+    db_session: Session, account: AccountOrm
+):
+    # M9.4: partial_reason, error_detail'in kendi round-trip desenini izler.
+    repo = SqlAlchemyRunLogRepository(db_session)
+    run_log = RunLog(
+        run_id=uuid4(),
+        account_id=account.account_id,
+        trigger_type=TriggerType.SCHEDULED,
+        started_at=NOW,
+        ended_at=NOW,
+        status=RunStatus.PARTIAL,
+        partial_reason="Devre kesici tetiklendi: 5 ardisik LinkedIn hatasi.",
+    )
+
+    created = repo.create(run_log)
+    fetched = repo.get_by_id(account.account_id, created.run_id)
+
+    assert fetched is not None
+    assert fetched.status == RunStatus.PARTIAL
+    assert fetched.partial_reason == "Devre kesici tetiklendi: 5 ardisik LinkedIn hatasi."
+
+
 def test_create_failed_run_requires_error_detail_at_domain_level(
     db_session: Session, account: AccountOrm
 ):

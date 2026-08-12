@@ -364,6 +364,10 @@ class RunLogOrm(Base):
         SqlEnum(RunStatus, name="run_status", values_callable=_enum_values)
     )
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # M1.1 duzeltmesi (M9.4): error_detail'den KASITLI OLARAK ayri - bkz.
+    # domain/run_log.py modul dokumani. Ayri bir migration'da eklenir
+    # (0002_run_logs_partial_reason.py) - 0001_initial_schema.py degismez.
+    partial_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     collection_capped: Mapped[bool] = mapped_column(Boolean, default=False)
 
 

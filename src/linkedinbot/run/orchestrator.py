@@ -17,18 +17,27 @@ TEKRARLAMASINI onler. `evaluated_jobs`/`reports`/(Success/Partial)
 `run_logs` TEK bir final transaction'da birlikte commit edilir (State
 Update, PRD adim 11).
 
-**Hata sinifi ayrimi (TDD Section 20, Roadmap M9.4'un henuz insa
-edilmemis kapsamiyla SINIRI):** M9.4 (Hata Siniflandirma + Retry) HENUZ
-YOK - `TransientError`/`PermanentError`/`PartialRecordError` taksonomisi
-ve backoff/circuit-breaker mekanizmasi Roadmap'in kendi metniyle acikca
-M9.4'e ayrilmistir. Bu modul bu taksonomiyi ICAT ETMEZ; onun yerine, ham
-pipeline'dan (Session Validation'dan State Update'e kadar) yukselen
-HERHANGI bir istisnayi tek, merkezi bir noktada yakalayip Run'in nihai
-durumunu (Success/Partial/Failed) belirler (TDD Section 20'nin "yalnizca
-Run Orchestrator bu istisnalardan Run'in nihai durumunu belirler"
-ilkesi) - Roadmap M9.3'un kendi Amac metninde "merkezi hata
-siniflandirmasi" olarak adlandirilan sey budur; TAM retry/backoff
-mekanizmasi degil.
+**Hata sinifi ayrimi (TDD Section 20, M9.4 "Hata Siniflandirma + Retry"
+ile GUNCELLENDI):** `TransientError`/`PermanentError` taksonomisi
+(errors.py) ve backoff/devre-kesici-lite mekanizmasi (retry.py) artik
+insa edildi - LinkedIn cagri noktasinda (`collection/collector.py`)
+KULLANILIR. Bu modulun KENDI sorumlulugu degismedi: pipeline'dan
+(Session Validation'dan State Update'e kadar) yukselen HERHANGI bir
+istisnayi (retry tukenmis bir `TransientError` DAHIL) tek, merkezi bir
+noktada yakalayip Run'in nihai durumunu (Success/Partial/Failed)
+belirler (TDD Section 20'nin "yalnizca Run Orchestrator bu istisnalardan
+Run'in nihai durumunu belirler" ilkesi). "Partial", `TransientError`
+YAKALANARAK degil, `collection_result.is_complete`'in (Collection Service
+NORMAL DONUS DEGERI - bkz. `collection/collector.py::CollectionResult`
+modul dokumani, "unified completeness" tasarimi, bagimsiz review sonrasi)
+OKUNMASIYLA belirlenir - pipeline devre kesici/sinir/kismi-sorgu-basarisizligi
+sonrasi KESILMEZ, elde edilen kismi veriyle NORMAL sekilde devam eder.
+`is_complete=False`'un UC bagimsiz sebebi olabilir (devre kesici, FR-21
+sinirina ulasilmasi, veya esik-alti bir sorgunun tum denemelerini
+tuketmesi) - bu modul bunlarin HICBIRINI ayri ayri sormaz, TEK bir
+`is_complete` okumasiyla Run'in nihai durumunu belirler. LLM cagri
+noktasindaki (`adapters/llm/anthropic_adapter.py`) retry entegrasyonu
+ayri, sonraki bir adimdir.
 
 **Basarisiz bir calistirmada run_logs (FR-15 vs EDGE-14 uzlasimi, M9.2
 gorusme turunde onaylanan tasarim):** PRD'nin 12 adimli pipeline'i
@@ -105,6 +114,8 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from sqlalchemy.exc import IntegrityError
+
 from linkedinbot.collection.collector import collect_raw_job_cards, extract_records
 from linkedinbot.config.loader import load_account_context
 from linkedinbot.domain.company_profile import CompanyProfile
@@ -124,6 +135,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from linkedinbot.adapters.llm.gateway import LLMGateway
+    from linkedinbot.domain.account_context import AccountContext
     from linkedinbot.domain.job_posting import JobPosting
     from linkedinbot.ports.company_repository_port import CompanyRepositoryPort
     from linkedinbot.ports.company_score_repository_port import CompanyScoreRepositoryPort
@@ -411,26 +423,31 @@ def _persist_evaluated_job(
 def _run_pipeline(
     *,
     account_id: UUID,
+    account_context: AccountContext,
     dependencies: OrchestratorDependencies,
     run_id: UUID,
     trigger_type: TriggerType,
     now: datetime,
     is_bootstrap: bool,
 ) -> RunLog:
-    account_context = load_account_context(account_id, dependencies.session)
     dependencies.linkedin_port.validate(account_id)
 
     config_profile = account_context.config_profile
 
-    raw_cards, collection_capped = collect_raw_job_cards(
+    thresholds = config_profile.thresholds
+    collection_result = collect_raw_job_cards(
         dependencies.linkedin_port,
         account_id,
         config_profile.target_criteria,
         config_profile.collection_limits.max_jobs_per_run,
         _COLLECTION_DELAY_SECONDS,
         _COLLECTION_JITTER_SECONDS,
+        thresholds.linkedin_retry_attempts,
+        thresholds.retry_base_delay_ms,
+        thresholds.retry_max_delay_ms,
+        thresholds.linkedin_consecutive_failure_threshold,
     )
-    raw_records = extract_records(raw_cards)
+    raw_records = extract_records(collection_result.raw_cards)
     jobs_collected = len(raw_records)
 
     current_scan = [normalize_record(record, now) for record in raw_records]
@@ -495,9 +512,36 @@ def _run_pipeline(
     dependencies.session.commit()  # eager: companies/company_scores (Section 17)
 
     # Kapanan ilanlar: onceki EvaluatedJob'un status'u Closed'e cevrilir.
-    for job_id in newly_closed_job_ids:
-        previous = previous_by_job_id[job_id]
-        evaluated_jobs.append(previous.model_copy(update={"status": JobStatus.CLOSED}))
+    #
+    # M9.4 duzeltmesi (self-review + bagimsiz review, uc AYRI gercek defect
+    # bulundu ve "unified completeness" tasarimiyla TEK bir koruma altinda
+    # birlestirildi): `collection_result.is_complete=False` ise (devre
+    # kesici tetiklendi, FR-21 hacim sinirina ulasildi, VEYA bir sorgu
+    # devre kesici esigine ulasmadan tum yeniden deneme denemelerini
+    # tuketti) bu adim TAMAMEN ATLANIR - ucu de AYNI kokten (eksik/kesintiye
+    # ugramis bir tarama) kaynaklanan tetikleyicilerdir. FR-21'in kendi
+    # kabul kriteri, sinira ulasilan bir calistirmayi acikca "kesildi"
+    # (toplama KESILDI) olarak tanimlar. `diff_job_postings()`'in (M4.2,
+    # degistirilmemis) "current_scan'de gorunmeyen HER onceki ilan
+    # kapanmistir" varsayimi, taranmayan/basarisiz olan HERHANGI bir
+    # sorgu/sayfa oldugunda GECERSIZDIR: o sorgunun/sayfanin bulacagi
+    # ilanlarin GERCEKTEN kapandigi anlamina GELMEZ, yalnizca BU
+    # calistirmada yeniden dogrulanamadiklari anlamina gelir. FR-10
+    # "Closed Job Detection," yalnizca GERCEKTEN kapali ilanlar icindir;
+    # bu koruma olmadan boyle bir calistirma, hesabin tarama sirasinda
+    # henuz ulasilmamis/dogrulanamamis TUM acik ilanlarini yanlislikla
+    # Closed isaretleyip raporlardan sessizce dusururdu. Bu ilanlar, bir
+    # SONRAKI (tam) taramada normal sekilde yeniden degerlendirilecektir.
+    #
+    # `scan_is_incomplete`, asagida `jobs_closed` sayimi icin de AYNEN
+    # kullanilir - iki yerin birbirinden SAPMASINI (orn. `jobs_closed`'in
+    # atlanan bir adimi HALA sayiyor gibi gorunmesini) onlemek icin TEK
+    # bir bayrakta birlestirilir.
+    scan_is_incomplete = not collection_result.is_complete
+    if not scan_is_incomplete:
+        for job_id in newly_closed_job_ids:
+            previous = previous_by_job_id[job_id]
+            evaluated_jobs.append(previous.model_copy(update={"status": JobStatus.CLOSED}))
 
     top_matches_count = config_profile.report_format_settings.top_matches_count
     top_matches = rank_top_matches(evaluated_jobs, top_matches_count)
@@ -564,6 +608,19 @@ def _run_pipeline(
     # db/models.py ReportOrm) - butun bu yazmalar HALA AYNI, henuz commit
     # edilmemis transaction icindedir (TDD Section 17 "atomic final state"),
     # bu yuzden bu sadece INSERT sirasidir, ayri bir commit DEGILDIR.
+    #
+    # Partial (M9.4, "unified completeness" duzeltmesi): `not
+    # collection_result.is_complete`, UC bagimsiz sebepten (devre kesici,
+    # FR-21 hacim siniri, veya esik-alti bir sorgu basarisizligi)
+    # HERHANGI birinin gerceklestigini gosterir - PRD Section 15.7 geregi
+    # bu HALA bir rapor ureten, TAM TESEKKULLU bir sonuctur (Failed
+    # DEGILDIR); pipeline bu noktaya kadar zaten `collection_result.raw_cards`
+    # (ne kadar toplanabildiyse) ile normal sekilde devam etmistir. Tek
+    # istisna, yukaridaki "Kapanan ilanlar" adiminin `scan_is_incomplete`
+    # iken BILEREK atlanmasidir (yanlis-kapatma korumasi) - bu yuzden
+    # `jobs_closed` burada `newly_closed_job_ids`'in HAM uzunlugu DEGIL, o
+    # adimda FIILEN Closed isaretlenen sayidir (scan eksikken her zaman 0).
+    jobs_closed = 0 if scan_is_incomplete else len(newly_closed_job_ids)
     run_log = RunLog(
         run_id=run_id,
         account_id=account_id,
@@ -573,9 +630,12 @@ def _run_pipeline(
         jobs_collected=jobs_collected,
         jobs_filtered=jobs_filtered,
         jobs_new=jobs_new,
-        jobs_closed=len(newly_closed_job_ids),
-        status=RunStatus.SUCCESS,
-        collection_capped=collection_capped,
+        jobs_closed=jobs_closed,
+        status=RunStatus.SUCCESS if collection_result.is_complete else RunStatus.PARTIAL,
+        partial_reason=(
+            None if collection_result.is_complete else collection_result.partial_reason
+        ),
+        collection_capped=collection_result.collection_capped,
     )
     created_run_log = dependencies.run_log_repository.create(run_log)
 
@@ -634,47 +694,92 @@ def run(
     calistirir (Roadmap M9.3 "Beklenen Sonuc": "Tek bir fonksiyon
     cagrisi... uctan uca calistirir").
 
-    RunLock mesgulse `RunAlreadyInProgressError` firlatir (hicbir is
+    Hesap dogrulamasi (`load_account_context()`) `RunLock.acquire()`'dan
+    ONCE yapilir (independent review duzeltmesi, bkz. asagidaki not) - bu
+    yuzden RunLock mesgulse `RunAlreadyInProgressError` firlatir (hicbir is
     yapilmadan, hicbir run_logs satiri yazilmadan). Pipeline ortasinda
     HERHANGI bir istisna yakalanirsa: o ana kadarki (henuz commit
     edilmemis) batch degisiklikler geri alinir, AYRI bir Failed run_logs
     satiri yazilir ve o satir donulur (istisna yeniden firlatilmaz -
     "Run basarisiz oldu" bir CAGRI SONUCUDUR, orchestrator'in kendi
     calismasinin cokmesi degil). RunLock her kosulda serbest birakilir.
+
+    **Duzeltme notu (independent review bulgusu, Finding 1):** Ilk
+    implementasyon `RunLock.acquire()`'i hesap dogrulamasindan ONCE
+    cagiriyordu. `run_locks.account_id` `accounts.account_id`'ye bir
+    FOREIGN KEY tasidigi icin (bkz. db/models.py RunLockOrm), var olmayan
+    bir `account_id` ile `acquire()`'in kendi INSERT'i ham, yakalanmamis
+    bir `IntegrityError` firlatiyordu - `load_account_context()`'in
+    (config/loader.py, M2.2, degistirilmemis) tam da bu senaryo icin
+    ozel olarak tasarlanmis, acik "Hesap bulunamadi" `ValueError`'i hic
+    devreye girmiyordu (FR-15'in "sessiz hata olusmaz" ilkesini ihlal
+    eden, TUTARSIZ bir hata yolu). Duzeltme: hesap dogrulamasi ARTIK
+    `RunLock.acquire()`'dan ONCE yapilir - boylece gecersiz bir
+    `account_id` icin ASLA `run_locks`'a dokunulmaz.
+
+    ONEMLI: `run_logs.account_id` de AYNI turden bir FOREIGN KEY tasir
+    (bkz. db/models.py RunLogOrm) - bu yuzden var olmayan bir hesap icin
+    bir Failed `run_logs` satiri YAZILAMAZ (kaydedilecek gercek bir hesap
+    yoktur); bu, `RunAlreadyInProgressError`'in "hicbir is denenmedi"
+    ilkesiyle AYNI kategoridedir. Asagidaki `except` bloğu bu yuzden
+    ONCE Failed run_logs satirini yazmayi DENER (var olan bir hesap icin
+    diger TUM hata turlerinde - orn. eksik UserProfile/config profili -
+    bu BASARILI olur, mevcut davranis DEGISMEZ); yalnizca bu YAZMA
+    girisiminin KENDISI de bir `IntegrityError` ile basarisiz olursa
+    (yalnizca "hesap hic var olmuyor" durumunda mumkun), orijinal, acik
+    hata (orn. "Hesap bulunamadi") oldugu gibi yukari firlatilir.
     """
     run_id = uuid4()
     lock_owner = str(run_id)
     run_lock = RunLock(dependencies.session)
-
-    acquired = run_lock.acquire(account_id, lock_owner, now, lock_duration)
-    if not acquired:
-        raise RunAlreadyInProgressError(f"Hesap icin zaten bir calistirma suruyor: {account_id}")
-    dependencies.session.commit()
+    lock_acquired = False
 
     try:
+        account_context = load_account_context(account_id, dependencies.session)
+
+        acquired = run_lock.acquire(account_id, lock_owner, now, lock_duration)
+        if not acquired:
+            raise RunAlreadyInProgressError(
+                f"Hesap icin zaten bir calistirma suruyor: {account_id}"
+            )
+        lock_acquired = True
+        dependencies.session.commit()
+
         return _run_pipeline(
             account_id=account_id,
+            account_context=account_context,
             dependencies=dependencies,
             run_id=run_id,
             trigger_type=trigger_type,
             now=now,
             is_bootstrap=is_bootstrap,
         )
+    except RunAlreadyInProgressError:
+        raise
     except Exception as exc:  # noqa: BLE001 - TDD Section 20: merkezi hata siniflandirma noktasi
         dependencies.session.rollback()
-        failed_run_log = dependencies.run_log_repository.create(
-            RunLog(
-                run_id=run_id,
-                account_id=account_id,
-                trigger_type=trigger_type,
-                started_at=now,
-                ended_at=now,
-                status=RunStatus.FAILED,
-                error_detail=str(exc),
+        try:
+            failed_run_log = dependencies.run_log_repository.create(
+                RunLog(
+                    run_id=run_id,
+                    account_id=account_id,
+                    trigger_type=trigger_type,
+                    started_at=now,
+                    ended_at=now,
+                    status=RunStatus.FAILED,
+                    error_detail=str(exc),
+                )
             )
-        )
+        except IntegrityError:
+            # Hesabin KENDISI hic var olmuyorsa, run_logs.account_id'nin
+            # KENDI FK kisiti geregi bir Failed satir dahi yazilamaz -
+            # orijinal, acikca anlasilir hatayi (bkz. yukaridaki
+            # docstring notu) oldugu gibi yukari firlat.
+            dependencies.session.rollback()
+            raise exc from None
         dependencies.session.commit()
         return failed_run_log
     finally:
-        run_lock.release(account_id, lock_owner)
-        dependencies.session.commit()
+        if lock_acquired:
+            run_lock.release(account_id, lock_owner)
+            dependencies.session.commit()
