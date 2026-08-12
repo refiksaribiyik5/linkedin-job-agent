@@ -101,6 +101,7 @@ def test_confidence_above_threshold_passes_and_reports_the_confidence_score():
     assert result.passed is True
     assert result.confidence == 0.9
     assert "Sales & Business Development" in result.reason
+    assert result.matched_cluster == "Sales & Business Development"
 
 
 def test_confidence_below_threshold_is_rejected():
@@ -121,6 +122,9 @@ def test_confidence_below_threshold_is_rejected():
 
     assert result.passed is False
     assert result.confidence == 0.2
+    # LLM acikca "eslesen kume yok" (matched_cluster=None) dedi - bu,
+    # FilterResult.matched_cluster'a da None olarak dogru yansitilmalidir.
+    assert result.matched_cluster is None
 
 
 def test_confidence_exactly_at_threshold_passes():
@@ -182,3 +186,4 @@ def test_unavailable_llm_inference_is_rejected_by_default():
     assert result.passed is False
     assert result.confidence is None
     assert "could not be determined" in result.reason.lower()
+    assert result.matched_cluster is None

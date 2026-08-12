@@ -90,4 +90,5 @@ def filter_by_department(
         passed=passed,
         reason=f"Matched cluster: {cluster_description}. {inference.reasoning}",
         confidence=inference.confidence,
+        matched_cluster=inference.matched_cluster,
     )

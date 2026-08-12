@@ -134,6 +134,24 @@ def test_filter_result_confidence_out_of_range_raises_validation_error():
         FilterResult(passed=True, reason="test", confidence=1.5)
 
 
+def test_filter_result_matched_cluster_defaults_to_none():
+    # M1.1 duzeltmesi (M9.3 tasarim incelemesinde bulunan bosluk):
+    # matched_cluster, confidence ile AYNI desende opsiyoneldir -
+    # yalnizca departman filtresi doldurur, digerleri None birakir.
+    result = FilterResult(passed=True, reason="Listede degil")
+    assert result.matched_cluster is None
+
+
+def test_filter_result_matched_cluster_round_trips_when_provided():
+    result = FilterResult(
+        passed=True,
+        reason="Matched cluster: Sales & Business Development.",
+        confidence=0.9,
+        matched_cluster="Sales & Business Development",
+    )
+    assert result.matched_cluster == "Sales & Business Development"
+
+
 def test_valid_filter_result_detail_keyed_by_filter_name():
     job = EvaluatedJob(
         **_base_fields(

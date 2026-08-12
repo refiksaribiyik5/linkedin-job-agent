@@ -55,11 +55,20 @@ class FilterResult(BaseModel):
     """TDD Section 11: her filtre bir FilterResult doner (yalnizca boolean
     degil) - {passed, reason, confidence}. EvaluatedJob.filter_result_detail
     alaninin dogrudan kaynagidir (aciklanabilirlik, G-3).
+
+    `matched_cluster` (M1.1 duzeltmesi, M9.3 tasarim incelemesinde
+    bulunan bosluk): `confidence` ile AYNI desende opsiyoneldir - yalnizca
+    departman filtresi (`filtering/department_filter.py`, M6.4) doldurur,
+    digerleri (blacklist/location/experience) `None` birakir. Bu alan
+    olmadan, `EvaluatedJob.department_cluster`'i (FR-11, Must-have
+    departman gruplama) doldurmanin tek yolu `reason` serbest metnini
+    ayristirmak olurdu - yapisal olmayan, kirilgan bir yaklasim.
     """
 
     passed: bool
     reason: str
     confidence: float | None = Field(default=None, ge=0, le=1)
+    matched_cluster: str | None = None
 
 
 class MatchRationaleItem(BaseModel):
