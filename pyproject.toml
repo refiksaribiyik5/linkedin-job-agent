@@ -11,8 +11,8 @@ authors = [{ name = "Refik Saribiyik" }]
 
 # TDD Section 2'de secilen bagimliliklar, onlari fiilen kullanan ilk milestone'da
 # eklenir. Pydantic v2 (M1.1) ve SQLAlchemy 2.x + Alembic + psycopg (M1.2, TDD
-# Section 2 "ORM / Migration") eklenmistir. Playwright ve Anthropic SDK ve
-# APScheduler ise sirasiyla M3.1, M5.1, M9.5'te eklenecektir. TDD Section 26
+# Section 2 "ORM / Migration") eklenmistir. Playwright, Anthropic SDK ve
+# APScheduler sirasiyla M3.1, M5.1, M9.6'da eklenmistir. TDD Section 26
 # geregi kilitli (pinned) surum kullanilir. psycopg (psycopg3), SQLAlchemy 2.x
 # ile onerilen modern PostgreSQL suruculugudur. PyYAML (M1.4), TDD Section
 # 5/13'un config/*.yaml dosyalarini (system.defaults.yaml, accounts/*.yaml)
@@ -45,6 +45,9 @@ authors = [{ name = "Refik Saribiyik" }]
 # TDD Section 2'nin "LLM Saglayici" secimi - `LLMProviderPort`'un temel
 # implementasyonu icin resmi Python SDK'si; SDK'nin kendi "tool use"
 # mekanizmasi, yapilandirilmis (semaya uygun) cikti almak icin kullanilir.
+# APScheduler (M9.6), TDD Section 2'nin "Zamanlama" secimi - surec-ici
+# (in-process) bir zamanlayici, `SchedulerPort` arkasinda (bkz.
+# adapters/scheduling/apscheduler_adapter.py modul dokumani).
 dependencies = [
     "pydantic==2.13.4",
     "sqlalchemy==2.0.51",
@@ -56,6 +59,7 @@ dependencies = [
     "playwright==1.62.0",
     "beautifulsoup4==4.15.0",
     "anthropic==0.121.0",
+    "apscheduler==3.11.3",
 ]
 
 # M1.4: `linkedinbot seed` komutunu (bkz. cli.py) dogrudan calistirilabilir

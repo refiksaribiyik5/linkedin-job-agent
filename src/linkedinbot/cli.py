@@ -3,11 +3,15 @@
 M1.4: `seed` komutu eklenir - V1'in tek hesabini, kullanici profilini ve
 ilk (config_version=1, is_active=true) config profilini
 `config/system.defaults.yaml` + `config/accounts/default.account.yaml`
-dosyalarindan olusturur (Roadmap M1.4). `run` (M9.6) komutu sonraki bir
-milestone'da bu dosyaya eklenecektir - bu yuzden `cli.py`, ayri bir
-`scripts/seed.py` yerine burada baslatilir (TDD Section 5'in dosya
-agacinda zaten `cli.py` ayrilmistir, `scripts/` diye bir dizin hic
-yoktur).
+dosyalarindan olusturur (Roadmap M1.4). Manuel tetikleme icin bir `run`
+komutu M9.7'nin ("CLI Genişletmesi (Manuel Tetikleme)") kapsamidir - bu
+dosyanin M1.4 doneminde yazilan ONCEKI bir notu bunu yanlislikla M9.6'ya
+atfediyordu (M9.6/M9.7 ayrimi henuz netlesmeden yazilmis bir tahmin);
+M9.6 yalnizca zamanlama MEKANIZMASINI (`ports/scheduler_port.py`,
+`adapters/scheduling/apscheduler_adapter.py`) kurar, bu dosyaya HICBIR
+SEY eklemez - bu yuzden `cli.py`, ayri bir `scripts/seed.py` yerine
+burada baslatilir (TDD Section 5'in dosya agacinda zaten `cli.py`
+ayrilmistir, `scripts/` diye bir dizin hic yoktur).
 
 M2.4: `config validate` komutu eklenir - `--config-dir` ile verilen bir
 dizindeki AYNI iki YAML dosyasini (`seed`'in okudugu dosyalarla birebir
