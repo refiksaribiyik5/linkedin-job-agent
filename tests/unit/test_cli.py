@@ -492,30 +492,6 @@ def test_report_run_result_prints_error_detail_and_returns_one_for_failed(capsys
     assert "LinkedIn session expired" in err
 
 
-class _FakeSecretsProvider:
-    def __init__(self, values: dict[str, str] | None = None) -> None:
-        self._values = dict(values or {})
-
-    def get(self, key: str) -> str | None:
-        return self._values.get(key)
-
-    def set(self, key: str, value: str) -> None:
-        self._values[key] = value
-
-
-def test_require_secret_returns_the_value_when_present():
-    provider = _FakeSecretsProvider({"anthropic_api_key": "sk-ant-test"})
-
-    assert cli._require_secret(provider, "anthropic_api_key") == "sk-ant-test"
-
-
-def test_require_secret_raises_value_error_naming_the_key_when_missing():
-    provider = _FakeSecretsProvider({})
-
-    with pytest.raises(ValueError, match="anthropic_api_key"):
-        cli._require_secret(provider, "anthropic_api_key")
-
-
 ACCOUNT_ID = uuid4()
 
 
@@ -524,17 +500,21 @@ def test_run_run_command_commits_and_closes_on_success(monkeypatch, capsys):
     fake_engine = _FakeEngine()
     fake_dependencies = object()
     result = _run_log(RunStatus.SUCCESS)
+    run_account_calls = []
 
     monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
     monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
     monkeypatch.setattr(
         cli,
-        "_build_dependencies",
+        "build_dependencies",
         lambda account_id, session, config_dir, reports_dir, secrets_file: fake_dependencies,
     )
-    monkeypatch.setattr(
-        cli, "run_account", lambda account_id, dependencies, now, lock_duration: result
-    )
+
+    def _fake_run_account(account_id, dependencies, now, lock_duration, trigger_type):
+        run_account_calls.append(trigger_type)
+        return result
+
+    monkeypatch.setattr(cli, "run_account", _fake_run_account)
 
     exit_code = cli._run_run_command(
         ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json")
@@ -546,6 +526,10 @@ def test_run_run_command_commits_and_closes_on_success(monkeypatch, capsys):
     assert fake_session.closed is True
     assert fake_engine.disposed is True
     assert "Success" in capsys.readouterr().out
+    # M10.1 duzeltmesi: run_account() artik trigger_type'i ACIKCA alir -
+    # CLI'nin kendi cagri noktasi TriggerType.MANUAL'i gecirmelidir (main.py
+    # ile paylasilan bu fonksiyonun scheduled/manual ayrimi burada test edilir).
+    assert run_account_calls == [TriggerType.MANUAL]
 
 
 def test_run_run_command_prints_message_and_returns_one_when_already_running(
@@ -554,14 +538,14 @@ def test_run_run_command_prints_message_and_returns_one_when_already_running(
     fake_session = _FakeSession()
     fake_engine = _FakeEngine()
 
-    def _raise_already_running(account_id, dependencies, now, lock_duration):
+    def _raise_already_running(account_id, dependencies, now, lock_duration, trigger_type):
         raise RunAlreadyInProgressError(f"Hesap icin zaten bir calistirma suruyor: {account_id}")
 
     monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
     monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
     monkeypatch.setattr(
         cli,
-        "_build_dependencies",
+        "build_dependencies",
         lambda account_id, session, config_dir, reports_dir, secrets_file: object(),
     )
     monkeypatch.setattr(cli, "run_account", _raise_already_running)
@@ -587,7 +571,7 @@ def test_run_run_command_prints_message_and_returns_one_on_value_error(monkeypat
     def _raise_value_error(account_id, session, config_dir, reports_dir, secrets_file):
         raise ValueError("Secret bulunamadi: 'anthropic_api_key'")
 
-    monkeypatch.setattr(cli, "_build_dependencies", _raise_value_error)
+    monkeypatch.setattr(cli, "build_dependencies", _raise_value_error)
 
     exit_code = cli._run_run_command(
         ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json")
@@ -609,7 +593,7 @@ def test_run_run_command_rolls_back_closes_and_reraises_on_unexpected_error(monk
 
     monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
     monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
-    monkeypatch.setattr(cli, "_build_dependencies", _raise_unexpected)
+    monkeypatch.setattr(cli, "build_dependencies", _raise_unexpected)
 
     with pytest.raises(RuntimeError, match="unexpected boom"):
         cli._run_run_command(ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json"))

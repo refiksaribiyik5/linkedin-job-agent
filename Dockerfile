@@ -1,11 +1,16 @@
-# Taslak (draft) - bu asama (M0.2) itibariyle henuz kullanilmiyor.
+# Faz 10 / M10.1: `app` servisi icin tamamlanmis imaj (TDD Section 27
+# "Iki konteyner: app (Python sureci - scheduler dongusu + CLI) ve db").
 #
-# Uygulama konteyneri (`app` servisi), docker-compose.yml'e Faz 10 / M10.1'de
-# eklenip bu Dockerfile'a baglanacaktir (bkz. LinkedInBot-Roadmap.md,
-# LinkedInBot-TDD.md Section 27 "Dagitim Mimarisi"). Su an itibariyle
-# src/linkedinbot'un calisma zamani bagimliligi yoktur (bkz. pyproject.toml)
-# ve bir surec giris noktasi (main.py) henuz mevcut degildir; bu yuzden
-# burada bir CMD/ENTRYPOINT tanimlanmamistir.
+# NOT (Chromium): `perform_interactive_login()` (M3.1) `headless=False`
+# ile calisir - GORUNUR bir tarayici gerektirir, bu yuzden bu konteynerin
+# ICINDE calistirilamaz. M10.1'in kendi "Tamamlanma Dogrulamasi" metni bunu
+# ACIKCA istisna tutar ("M3.1'deki tek seferlik LinkedIn girisi disinda
+# manuel mudahale olmadan") - bu adim host makinede BIR KEZ calistirilir,
+# urettigi oturum durumu SecretsProvider araciligiyla kalici hale getirilir
+# (bkz. session_manager.py). Zamanlanmis calistirmalarin KENDISI
+# (check_session_is_valid/fetch_search_results_page, ikisi de headless=True)
+# bu konteynerin ICINDE calisir - bu yuzden Chromium ve isletim sistemi
+# bagimliliklari asagida kurulur.
 
 FROM python:3.12-slim
 
@@ -14,4 +19,12 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . \
+    && playwright install --with-deps chromium
+
+# `main.py` (Roadmap M10.1): uzun-omurlu scheduler dongusu - varsayilan
+# komut. Ayni imaj, tek seferlik/manuel komutlar icin de kullanilir (orn.
+# `docker compose run --rm app linkedinbot seed`) - `linkedinbot` konsol
+# script'i (pyproject.toml `[project.scripts]`) `pip install .` ile PATH'e
+# zaten eklenir.
+CMD ["python", "-m", "linkedinbot.main"]

@@ -1,12 +1,19 @@
-"""`cli.run_account()` icin entegrasyon testleri (Roadmap M9.7).
+"""`bootstrap.run_account()` icin entegrasyon testleri (Roadmap M9.7, M10.1).
 
-Bu dosya SADECE `run_account()`'in KENDI sorumlulugunu test eder:
-`TriggerType.MANUAL` ile `orchestrator.run()`'u (M9.3, degistirilmemis)
-cagirmak ve `is_bootstrap`'i FR-20/EDGE-13'un "Job History Store bu hesap
-icin bos mu" tanimina gore hesaplamak. `orchestrator.run()`'un KENDI
-pipeline/transaction/hata-siniflandirma davranisi ZATEN
+Bu dosya SADECE `run_account()`'in KENDI sorumlulugunu test eder: verilen
+`trigger_type` ile `orchestrator.run()`'u (M9.3, degistirilmemis) cagirmak
+ve `is_bootstrap`'i FR-20/EDGE-13'un "Job History Store bu hesap icin bos
+mu" tanimina gore hesaplamak. `orchestrator.run()`'un KENDI pipeline/
+transaction/hata-siniflandirma davranisi ZATEN
 `tests/integration/db/test_orchestrator.py`'de kapsamli sekilde test
 edilmistir - burada TEKRAR EDILMEZ.
+
+M10.1 duzeltmesi (bagimsiz inceleme): `run_account()`, `main.py`'nin
+`cli.py`'den dogrudan import etmesini onlemek icin `bootstrap.py`'ye
+tasindi (bkz. bootstrap.py modul dokumani) ve `trigger_type: TriggerType`'i
+ACIKCA bir parametre olarak almaya baslatti (ONCEDEN `TriggerType.MANUAL`
+sabit kodluydu) - bu dosya, HEM Manuel HEM Scheduled tetiklemenin dogru
+sekilde `RunLog.trigger_type`'a yansidigini dogrular.
 
 Bu projenin "her test dosyasi kendi sahtelerini tanimlar" konvansiyonuna
 uygun olarak, `test_orchestrator.py`'nin fake'leri buraya import
@@ -23,7 +30,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from linkedinbot.adapters.reporting.filesystem_report_store import FilesystemReportStore
-from linkedinbot.cli import run_account
+from linkedinbot.bootstrap import run_account
 from linkedinbot.db.models import AccountConfigProfileOrm, UserProfileOrm
 from linkedinbot.db.repositories.company_repository import SqlAlchemyCompanyRepository
 from linkedinbot.db.repositories.company_score_repository import SqlAlchemyCompanyScoreRepository
@@ -227,16 +234,37 @@ def _make_dependencies(db_session: Session, tmp_path, linkedin_port, llm_gateway
     )
 
 
-def test_run_account_uses_manual_trigger_type(db_session: Session, account, tmp_path):
+def test_run_account_passes_through_the_manual_trigger_type(db_session: Session, account, tmp_path):
     _, _company, card = _unique_job_and_card()
     _seed_account_context(db_session, account.account_id)
     dependencies = _make_dependencies(
         db_session, tmp_path, _FakeLinkedInPort([[card]]), _ScriptedLLMGateway()
     )
 
-    result = run_account(account.account_id, dependencies, NOW, LOCK_DURATION)
+    result = run_account(account.account_id, dependencies, NOW, LOCK_DURATION, TriggerType.MANUAL)
 
     assert result.trigger_type == TriggerType.MANUAL
+    assert result.status == RunStatus.SUCCESS
+
+
+def test_run_account_passes_through_the_scheduled_trigger_type(
+    db_session: Session, account, tmp_path
+):
+    # M10.1 duzeltmesi: `main.py`'nin `on_trigger` geri-cagirmasinin
+    # cagiracagi AYNI fonksiyon - zamanlanmis bir calistirmanin
+    # `run_logs.trigger_type`'i yanlislikla "Manual" olarak KALMADIGINI
+    # dogrular (bagimsiz incelemede bulunan bir risk).
+    _, _company, card = _unique_job_and_card()
+    _seed_account_context(db_session, account.account_id)
+    dependencies = _make_dependencies(
+        db_session, tmp_path, _FakeLinkedInPort([[card]]), _ScriptedLLMGateway()
+    )
+
+    result = run_account(
+        account.account_id, dependencies, NOW, LOCK_DURATION, TriggerType.SCHEDULED
+    )
+
+    assert result.trigger_type == TriggerType.SCHEDULED
     assert result.status == RunStatus.SUCCESS
 
 
@@ -252,7 +280,7 @@ def test_run_account_marks_a_first_run_as_bootstrap(db_session: Session, account
         db_session, tmp_path, _FakeLinkedInPort([[card]]), _ScriptedLLMGateway()
     )
 
-    result = run_account(account.account_id, dependencies, NOW, LOCK_DURATION)
+    result = run_account(account.account_id, dependencies, NOW, LOCK_DURATION, TriggerType.MANUAL)
 
     report = dependencies.report_repository.get_by_run_id(account.account_id, result.run_id)
     assert report is not None
@@ -266,7 +294,7 @@ def test_run_account_does_not_mark_a_later_run_as_bootstrap(db_session: Session,
     first_dependencies = _make_dependencies(
         db_session, tmp_path, _FakeLinkedInPort([[card_a]]), _ScriptedLLMGateway()
     )
-    run_account(account.account_id, first_dependencies, NOW, LOCK_DURATION)
+    run_account(account.account_id, first_dependencies, NOW, LOCK_DURATION, TriggerType.MANUAL)
 
     # Ikinci calistirma: hesabin ARTIK en az bir `evaluated_jobs` kaydi var -
     # Job History Store bu hesap icin ARTIK bos degil.
@@ -276,7 +304,9 @@ def test_run_account_does_not_mark_a_later_run_as_bootstrap(db_session: Session,
         db_session, tmp_path, _FakeLinkedInPort([[card_b]]), _ScriptedLLMGateway()
     )
 
-    second_result = run_account(account.account_id, second_dependencies, second_now, LOCK_DURATION)
+    second_result = run_account(
+        account.account_id, second_dependencies, second_now, LOCK_DURATION, TriggerType.SCHEDULED
+    )
 
     report = second_dependencies.report_repository.get_by_run_id(
         account.account_id, second_result.run_id
@@ -300,4 +330,4 @@ def test_run_account_propagates_run_already_in_progress_error(
     )
 
     with pytest.raises(RunAlreadyInProgressError):
-        run_account(account.account_id, dependencies, NOW, LOCK_DURATION)
+        run_account(account.account_id, dependencies, NOW, LOCK_DURATION, TriggerType.MANUAL)

@@ -1,14 +1,36 @@
-# M0.2 - Yerel gelistirme altyapisi.
-#
-# Bu asamada yalnizca `db` servisi vardir. Uygulama konteyneri (`app`) henuz
-# yoktur; Faz 10 / M10.1'de eklenecektir (bkz. LinkedInBot-Roadmap.md,
-# LinkedInBot-TDD.md Section 27 "Dagitim Mimarisi").
+# Faz 10 / M10.1: tam sistem (`app` + `db`, TDD Section 27 "Iki konteyner").
 #
 # Kimlik bilgileri .env.example'daki DATABASE_URL ile tutarlidir
 # (linkedinbot / changeme / linkedinbot). Gercek bir .env dosyasi olusturup
 # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB degerlerini oradan
 # gecersiz kilabilirsiniz (bkz. TDD Section 27: "Konfigurasyon/secrets .env
 # ... uzerinden enjekte edilir").
+#
+# Bootstrap sirasi (M10.1 "Tamamlanma Dogrulamasi", M3.1'deki tek seferlik
+# LinkedIn girisi disinda manuel mudahale gerektirmez):
+#   1. docker compose up -d db
+#   2. docker compose run --rm app linkedinbot seed --config-dir /app/config
+#      (ciktidaki account_id'yi .env'e ACCOUNT_ID olarak yazin - `seed`
+#      ne ACCOUNT_ID'ye ne secrets'a ihtiyac duyar, bu yuzden ASAGIDAKI
+#      ACCOUNT_ID/LINKEDINBOT_SECRETS_ENCRYPTION_KEY degiskenleri KASITLI
+#      OLARAK zorunlu degildir - `main.py`/`bootstrap.py` kendi ACIK
+#      hatalarini yalnizca GERCEKTEN ihtiyac duyulunca verir)
+#   3. LINKEDINBOT_SECRETS_ENCRYPTION_KEY'i .env'de sabitleyin (bos
+#      birakilmamali - Docker'in ICINDE OS keychain YOKTUR, bkz.
+#      .env.example), sonra Anthropic API anahtarini yazin:
+#      docker compose run --rm app python -c "
+#      from linkedinbot.adapters.secrets.local_keyring_adapter import LocalKeyringSecretsProvider, resolve_encryption_key
+#      from pathlib import Path
+#      LocalKeyringSecretsProvider(Path('/app/secrets/secrets.json'), resolve_encryption_key()).set('anthropic_api_key', input('Anthropic API key: '))
+#      "
+#   4. LinkedIn oturumunu HOST'ta bir kez kurun (headless=False gerektirir,
+#      bu imajin ICINDE calistirilamaz - bkz. Dockerfile notu). Bu adim
+#      `./secrets/secrets.json`'a (asagidaki bind mount) AYNI
+#      LINKEDINBOT_SECRETS_ENCRYPTION_KEY ile yazmalidir - orn.
+#      `set -a; source .env; set +a` ile ayni anahtari host kabuguna
+#      tasiyip host'un KENDI `.venv`'inden calistirin; aksi halde main.py
+#      konteyner icinde farkli bir anahtarla decrypt etmeye calisir.
+#   5. docker compose up -d app
 
 services:
   db:
@@ -21,6 +43,54 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-linkedinbot} -d ${POSTGRES_DB:-linkedinbot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-linkedinbot}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-linkedinbot}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Bilerek ZORUNLU (`:?`) DEGIL: bu servisin GORUNTUSU `linkedinbot
+      # seed`/`config validate` gibi ihtiyac duymayan komutlar icin de
+      # `docker compose run` ile calistirilir (bkz. yukaridaki Bootstrap
+      # sirasi) - servis-genelinde bir `:?` zorunlulugu bu komutlari
+      # ACCOUNT_ID/secrets henuz mevcut olmadan BLOKE ederdi (bagimsiz
+      # incelemede bulunan bir bulgu). Gercek dogrulama zaten VAR: main.py
+      # (`_resolve_account_id`) ve bootstrap.py (`_require_secret`,
+      # `resolve_encryption_key`) her ikisi de KENDI acik/isimlendirilmis
+      # hatalarini yalnizca GERCEKTEN ihtiyac duyulunca (main.py fiilen
+      # calisirken) verir.
+      LINKEDINBOT_SECRETS_ENCRYPTION_KEY: ${LINKEDINBOT_SECRETS_ENCRYPTION_KEY:-}
+      ACCOUNT_ID: ${ACCOUNT_ID:-}
+      CONFIG_DIR: /app/config
+      REPORTS_DIR: /app/reports
+      SECRETS_FILE: /app/secrets/secrets.json
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # config/: is kurallarini insan duzenler (TDD Section 27: "mount
+      # edilmis config/ dizini uzerinden enjekte edilir").
+      - ./config:/app/config:ro
+      # reports/: V1'in ana ciktisi - kullanici raporu Docker'in DISINDAN,
+      # dogrudan dosya sisteminden okuyup manuel basvurmalidir (PRD Section
+      # 1: "insan her zaman manuel basvurur").
+      - ./reports:/app/reports
+      # secrets/: sifreli secrets deposu (TDD Section 27: "konteyner
+      # disinda, host uzerinde kalici"). BIND MOUNT (named volume DEGIL,
+      # bagimsiz incelemede bulunan bir bulgunun duzeltmesi): LinkedIn
+      # interaktif girisi (M3.1) `headless=False` gerektirdigi icin
+      # konteynerin DISINDA, host'ta calistirilmalidir (bkz. Dockerfile) -
+      # o adim, sonucunu (storage_state) `secrets.json`'a yazabilmek icin
+      # bu dosyaya DOGRUDAN bir host yoluyla erismelidir; bir named volume
+      # (Docker Desktop'ta host'tan dogrudan erisilemez, orn. macOS) bu
+      # adimi imkansiz kilardi.
+      - ./secrets:/app/secrets
+    restart: unless-stopped
 
 volumes:
   pgdata:

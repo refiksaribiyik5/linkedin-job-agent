@@ -22,3 +22,20 @@ venv/
 
 # --- Loglar ---
 *.log
+
+# --- Yedekler (bkz. scripts/backup.sh, Roadmap M10.1) ---
+backups/
+
+# --- Calisma-zamani ciktilari (bkz. cli.py/main.py "--reports-dir"/
+# "--secrets-file" varsayilanlari) - TDD Section 5'in checked-in dosya
+# agacinin PARCASI DEGILDIR: `reports/` FR-17'nin ürettiği, kişiye özel
+# iş-arama raporlarını taşır; `secrets.json` TDD Section 24'ün tanımladığı
+# şifreli secrets deposudur (LLM API anahtarı + LinkedIn oturum durumu) -
+# ikisi de `.env` ile AYNI gerekçeyle asla commit edilmemelidir.
+/reports/
+/secrets.json
+# `docker-compose.yml`'in `app` servisi icin bind-mount edilen ayni
+# sinif secrets deposu (bkz. docker-compose.yml "secrets/" notu) -
+# yukaridaki duz-dosya varsayilanindan (/secrets.json, dogrudan cli.py/
+# main.py calistirmalari icin) AYRI bir yol oldugu icin AYRICA eklenir.
+/secrets/

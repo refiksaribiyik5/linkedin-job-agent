@@ -80,6 +80,22 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# M10.1 duzeltmesi (bagimsiz incelemede bulunan, ampirik olarak dogrulanmis
+# bir bulgu): setuptools'un varsayilan paket kesfi yalnizca .py dosyalarini
+# dahil eder. `reporting/compiler.py`, sablonunu (`markdown_report.template.md`,
+# M8.2) `Path(__file__).parent / "templates" / ...` ile CALISMA ZAMANINDA
+# okur - bu, editable kurulumda (`pip install -e .`, tum gelistirme/test
+# ortaminin bugune kadar kullandigi TEK kurulum sekli) her zaman calisir
+# (cunku __file__ dogrudan src/ agacina isaret eder), ama Dockerfile'in
+# kullandigi GERCEK (editable OLMAYAN) `pip install .` bu dosyayi site-packages'a
+# KOPYALAMAZ - derlenen wheel'in ICERIGI kontrol edilerek dogrulandi (.md
+# dosyasi YOKTU). Sonuc: konteyner icinde HER calistirma, rapor derleme
+# asamasinda (PRD Section 10 adim 10, atlanamaz) `FileNotFoundError` ile
+# basarisiz olurdu - hicbir testte YAKALANMAZ, cunku tum testler editable
+# kurulum uzerinden calisir. `package-data` acikca eklenir.
+[tool.setuptools.package-data]
+linkedinbot = ["reporting/templates/*.md"]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
