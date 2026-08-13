@@ -28,27 +28,73 @@ mantigini ONCEDEN UYGULAMAZ - yalnizca iki YAML dosyasini okuyup birlestirip
 DB'ye bir kere yazan (`seed`) veya sadece dogrulayan (`config validate`)
 minimal islemlerdir (bkz. `_deep_merge`, `seed`, `validate_config_files`
 fonksiyonlarinin dokumanlari).
+
+M9.7: `run` komutu eklenir - FR-12'nin manuel tetiklemesini, otomatik
+cizelgeden bagimsiz olarak ekler. Bagimsiz dogrulama sonrasi onaylanan
+karar geregi yalnizca `--account <id>` desteklenir (TDD Section 12'nin
+"veya V1'de argumansiz" parantezi betimleyici bir ornektir, M9.7'nin
+KENDI kabul kriterlerinde YER ALMAZ - bkz. asagidaki `run` bolumunun
+kendi notu). Bu komut, `_build_dependencies()` araciligiyla TDD Section
+9'un "ayrı bir kısa ömürlü süreç olarak Orchestrator'ı doğrudan çağırır"
+tanimladigi composition root'u kurar - `main.py`'nin (henuz insa
+edilmemis) zamanlanmis yol icin kuracagi sekle benzer, ama SADECE bu
+dosyadan (manuel tetikleme) ibarettir.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import yaml
 from sqlalchemy.orm import Session
 
+from linkedinbot.adapters.linkedin.playwright_client import (
+    check_session_is_valid,
+    fetch_search_results_page,
+    perform_interactive_login,
+)
+from linkedinbot.adapters.linkedin.session_manager import SessionManager
+from linkedinbot.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
+from linkedinbot.adapters.llm.gateway import LLMGateway
+from linkedinbot.adapters.llm.prompt_registry import PromptRegistry
+from linkedinbot.adapters.reporting.filesystem_report_store import FilesystemReportStore
+from linkedinbot.adapters.secrets.local_keyring_adapter import (
+    LocalKeyringSecretsProvider,
+    resolve_encryption_key,
+)
+from linkedinbot.config.loader import load_account_context
 from linkedinbot.config.schema import AccountConfigProfile
 from linkedinbot.config.validator import ConfigValidationError, validate_config
 from linkedinbot.db.engine import create_db_engine, create_session_factory
 from linkedinbot.db.models import AccountConfigProfileOrm
 from linkedinbot.db.repositories.account_repository import SqlAlchemyAccountRepository
+from linkedinbot.db.repositories.company_repository import SqlAlchemyCompanyRepository
+from linkedinbot.db.repositories.company_score_repository import SqlAlchemyCompanyScoreRepository
+from linkedinbot.db.repositories.evaluated_job_repository import SqlAlchemyEvaluatedJobRepository
+from linkedinbot.db.repositories.job_repository import SqlAlchemyJobRepository
+from linkedinbot.db.repositories.report_repository import SqlAlchemyReportRepository
+from linkedinbot.db.repositories.run_log_repository import SqlAlchemyRunLogRepository
 from linkedinbot.db.repositories.user_profile_repository import SqlAlchemyUserProfileRepository
 from linkedinbot.domain.account import Account
+from linkedinbot.domain.run_log import RunLog, RunStatus, TriggerType
 from linkedinbot.domain.user_profile import Preferences, UserProfile
+from linkedinbot.logging.structured_logger import StructuredLogger
+from linkedinbot.ports.secrets_provider_port import SecretsProviderPort
+from linkedinbot.run import orchestrator
+from linkedinbot.run.orchestrator import OrchestratorDependencies, RunAlreadyInProgressError
+
+# PRD/TDD hicbir yerde bir "Lock Timeout" degeri tanimlamaz (bkz.
+# run_lock.py modul dokumaninin ayni notu) - somut deger, orchestrator.run()'un
+# ILK GERCEK cagirani olarak burada (M9.7) bir implementasyon-zamani karari
+# olarak sabitlenir. `max_jobs_per_run` (varsayilan 200) kadar ilan icin
+# LLM retry/backoff dahil gercekci bir ust sinir.
+_LOCK_DURATION = timedelta(hours=2)
 
 
 def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
@@ -263,6 +309,187 @@ def _run_seed_command(config_dir: Path) -> None:
     print(f"Seed tamamlandi: account_id={account.account_id}")
 
 
+# ---------------------------------------------------------------------------
+# `run` (Roadmap M9.7, FR-12 manuel tetikleme). Bagimsiz dogrulama sonrasi
+# onaylanan karar: yalnizca `--account <id>` desteklenir - TDD Section 12'nin
+# "veya V1'de argumansiz" parantezi, M9.7'nin KENDI "Beklenen Sonuc"/
+# "Tamamlanma Dogrulamasi" metninde YER ALMAZ ve FR-12'nin kabul kriterleri
+# de CLI sozdizimine deginmez; bu betimleyici bir ornektir, zorunlu bir
+# kabul kriteri degildir. Bu yuzden `AccountRepositoryPort`'a "tek hesabi
+# bul" gibi yeni bir metod EKLENMEZ (M1.3'e bir Roadmap duzeltmesi
+# gerektirmez).
+# ---------------------------------------------------------------------------
+
+
+def run_account(
+    account_id: UUID,
+    dependencies: OrchestratorDependencies,
+    now: datetime,
+    lock_duration: timedelta,
+) -> RunLog:
+    """Manuel tetiklemenin gercek isi: `orchestrator.run()`'u `TriggerType.MANUAL`
+    ile cagirir (Roadmap M9.7 "Bileşenler: CLI, Run Orchestrator, RunLock" -
+    RunLock burada AYRICA kontrol edilmez, `orchestrator.run()`'un KENDI
+    ic RunLock kontrolu hem otomatik hem manuel yolun AYNI kilidi
+    kullanmasini zaten garanti eder, bkz. TDD Section 12 "Hem otomatik hem
+    manuel tetikleme aynı kilidi kontrol eder").
+
+    `is_bootstrap`, `reporting/compiler.py`'nin KENDI dokumaninin
+    ongordugu sekilde (FR-20/EDGE-13: "Job History Store" bu hesap icin
+    bos mu) hesaplanir - `evaluated_job_repository.list_by_account()`,
+    orchestrator.py'nin (M9.3, degistirilmemis) `previous_by_job_id`'yi
+    olusturmak icin ZATEN kullandigi AYNI sorgudur; burada AYRI bir
+    "Job History Store bos mu" kavrami ICAT EDILMEZ.
+
+    `RunAlreadyInProgressError` DAHIL hicbir istisna burada yakalanmaz -
+    `orchestrator.run()`'un kendi davranisi degistirilmeden cagirana
+    (`_run_run_command`) sizar.
+    """
+    is_bootstrap = len(dependencies.evaluated_job_repository.list_by_account(account_id)) == 0
+    return orchestrator.run(
+        account_id, dependencies, TriggerType.MANUAL, now, lock_duration, is_bootstrap
+    )
+
+
+def _report_run_result(result: RunLog) -> int:
+    """`run_account()`'in donen `RunLog`'unu kullaniciya raporlar (Roadmap
+    M9.7 "Beklenen Sonuc"). Success/Partial HALA TAM TESEKKULLU bir
+    sonuctur (PRD Section 15.7, M9.4'un "Partial bir hata DEGILDIR"
+    ilkesi) - stdout'a yazilir, cikis kodu 0'dir. Yalnizca Failed
+    stderr'e yazilir ve 1 doner (`config validate`'in 0=gecerli/1=gecersiz
+    konvansiyonuyla tutarli)."""
+    if result.status == RunStatus.FAILED:
+        print(f"Calistirma basarisiz oldu: {result.error_detail}", file=sys.stderr)
+        return 1
+
+    summary = (
+        f"Calistirma tamamlandi: durum={result.status.value}, "
+        f"toplanan={result.jobs_collected}, filtrelenen={result.jobs_filtered}, "
+        f"yeni={result.jobs_new}, kapanan={result.jobs_closed}"
+    )
+    if result.status == RunStatus.PARTIAL and result.partial_reason:
+        summary += f" ({result.partial_reason})"
+    print(summary)
+    return 0
+
+
+def _require_secret(secrets_provider: SecretsProviderPort, key: str) -> str:
+    """`SecretsProviderPort.get()`'in "sessizce bir varsayilan uretmez,
+    None doner" ilkesinin (bkz. secrets_provider_port.py) cagiran
+    tarafinda nasil ele alinacagina karar verir - eksik bir secret icin
+    acik, anahtar adini isimlendiren bir `ValueError` firlatir."""
+    value = secrets_provider.get(key)
+    if value is None:
+        raise ValueError(
+            f"Secret bulunamadi: '{key}'. LocalKeyringSecretsProvider.set() "
+            "ile once ayarlanmalidir (bkz. TDD Section 24)."
+        )
+    return value
+
+
+def _build_dependencies(
+    account_id: UUID,
+    session: Session,
+    config_dir: Path,
+    reports_dir: Path,
+    secrets_file: Path,
+) -> OrchestratorDependencies:
+    """Roadmap M9.7'nin manuel tetikleme yolu icin somut composition
+    root'u - TDD Section 9 "Süreç modeli"nin "ayrı bir kısa ömürlü süreç
+    olarak Orchestrator'ı doğrudan çağırır" tanimladigi yol. `main.py`
+    (TDD Section 5, henuz insa edilmemis) zamanlanmis yol icin AYNI sekli
+    kuracaktir, ama bu fonksiyon M9.7'nin KENDI dosyasindan (cli.py)
+    OTESINE gecmez (bkz. `ports/scheduler_port.py`/`apscheduler_adapter.py`
+    modul dokumanlarinin "sahiplik sınırı" notlari, M9.6).
+
+    `account_context.config_profile.thresholds`, `AnthropicLLMAdapter`'in
+    retry parametrelerini SAGLAMAK icin burada yuklenir - `orchestrator.run()`
+    KENDISI de dahili olarak ayni hesabi tekrar yukler (degistirilmemis,
+    M9.3); bu kucuk bir tekrardir ama KACINILMAZDIR, cunku adaptor INSA
+    EDILMEDEN once retry parametrelerine ihtiyac vardir ve `orchestrator.run()`
+    kendi config yuklemesini disaridan bir parametre olarak KABUL ETMEZ
+    (imzasi degistirilmez, "Preserve existing public APIs").
+    """
+    account_context = load_account_context(account_id, session)
+    thresholds = account_context.config_profile.thresholds
+
+    secrets_provider = LocalKeyringSecretsProvider(secrets_file, resolve_encryption_key())
+    api_key = _require_secret(secrets_provider, "anthropic_api_key")
+
+    linkedin_port = SessionManager(
+        session,
+        secrets_provider,
+        perform_interactive_login,
+        check_session_is_valid,
+        fetch_search_results_page,
+    )
+    llm_gateway = LLMGateway(
+        llm_provider=AnthropicLLMAdapter(
+            api_key=api_key,
+            llm_retry_attempts=thresholds.llm_retry_attempts,
+            retry_base_delay_ms=thresholds.retry_base_delay_ms,
+            retry_max_delay_ms=thresholds.retry_max_delay_ms,
+        ),
+        prompt_registry=PromptRegistry(prompts_dir=config_dir / "prompts"),
+    )
+
+    return OrchestratorDependencies(
+        session=session,
+        linkedin_port=linkedin_port,
+        llm_gateway=llm_gateway,
+        report_store=FilesystemReportStore(reports_dir),
+        job_repository=SqlAlchemyJobRepository(session),
+        company_repository=SqlAlchemyCompanyRepository(session),
+        company_score_repository=SqlAlchemyCompanyScoreRepository(session),
+        evaluated_job_repository=SqlAlchemyEvaluatedJobRepository(session),
+        report_repository=SqlAlchemyReportRepository(session),
+        run_log_repository=SqlAlchemyRunLogRepository(session),
+        structured_logger=StructuredLogger(level=os.environ.get("LOG_LEVEL", "INFO")),
+    )
+
+
+def _run_run_command(
+    account_id: UUID, config_dir: Path, reports_dir: Path, secrets_file: Path
+) -> int:
+    """`linkedinbot run --account <id>`'in gercek CLI cagrisi (Roadmap M9.7).
+
+    `orchestrator.run()` (dolayisiyla `run_account()`) KENDI transaction
+    sinirini/commit'lerini yonetir (bkz. orchestrator.py modul dokumani,
+    "eager cache, atomic final state") - bu yuzden burada basari yolunda
+    AYRI bir `session.commit()` cagrisi YOKTUR (`seed()`'in aksine - o
+    KENDI commit ETMEYEN bir fonksiyondur, transaction siniri cagirana
+    birakilir). Hata yollarindaki `session.rollback()` savunma amaclidir:
+    `orchestrator.run()`'un KENDI hata yollari zaten temiz kalir, ama
+    `_build_dependencies()` (orn. `load_account_context()` okumasi veya
+    eksik bir secret) `orchestrator.run()`'a hic ULASMADAN basarisiz
+    olabilir.
+    """
+    engine = create_db_engine()
+    session_factory = create_session_factory(engine)
+    session: Session = session_factory()
+    try:
+        dependencies = _build_dependencies(
+            account_id, session, config_dir, reports_dir, secrets_file
+        )
+        result = run_account(account_id, dependencies, datetime.now(UTC), _LOCK_DURATION)
+    except RunAlreadyInProgressError as exc:
+        session.rollback()
+        print(str(exc), file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        session.rollback()
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+        engine.dispose()
+
+    return _report_run_result(result)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="linkedinbot")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -294,6 +521,39 @@ def main(argv: list[str] | None = None) -> int:
         help="system.defaults.yaml ve accounts/ alt dizinini iceren dizin (varsayilan: ./config).",
     )
 
+    run_parser = subparsers.add_parser(
+        "run",
+        help=(
+            "Bir hesap icin manuel bir calistirmayi hemen tetikler, otomatik "
+            "cizelgeden bagimsiz olarak (Roadmap M9.7, FR-12)."
+        ),
+    )
+    run_parser.add_argument(
+        "--account",
+        type=UUID,
+        required=True,
+        dest="account_id",
+        help="Calistirilacak hesabin account_id'si (zorunlu).",
+    )
+    run_parser.add_argument(
+        "--config-dir",
+        type=Path,
+        default=Path("config"),
+        help="Prompt sablonlarini iceren dizin (varsayilan: ./config).",
+    )
+    run_parser.add_argument(
+        "--reports-dir",
+        type=Path,
+        default=Path("reports"),
+        help="Uretilen raporlarin kalici olarak yazilacagi dizin (varsayilan: ./reports).",
+    )
+    run_parser.add_argument(
+        "--secrets-file",
+        type=Path,
+        default=Path("secrets.json"),
+        help="Sifreli secrets deposu dosyasi (varsayilan: ./secrets.json).",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "seed":
@@ -301,6 +561,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "config" and args.config_command == "validate":
         return _run_config_validate_command(args.config_dir)
+    if args.command == "run":
+        return _run_run_command(
+            args.account_id, args.config_dir, args.reports_dir, args.secrets_file
+        )
 
     return 0
 

@@ -9,6 +9,8 @@ from linkedinbot import cli
 from linkedinbot.cli import _deep_merge, validate_config_files
 from linkedinbot.config.validator import ConfigValidationError
 from linkedinbot.domain.account import Account
+from linkedinbot.domain.run_log import RunLog, RunStatus, TriggerType
+from linkedinbot.run.orchestrator import RunAlreadyInProgressError
 
 NOW = datetime(2026, 8, 8, tzinfo=UTC)
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -417,3 +419,261 @@ def test_main_config_validate_propagates_nonzero_exit_code(monkeypatch):
     monkeypatch.setattr(cli, "_run_config_validate_command", lambda config_dir: 1)
 
     assert cli.main(["config", "validate"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# `run` (Roadmap M9.7, FR-12 manuel tetikleme). `--account` ZORUNLUDUR -
+# argumansiz form (TDD Section 12'nin tek satirlik parantez ornegi)
+# M9.7'nin KENDI "Beklenen Sonuc"/"Tamamlanma Dogrulamasi" metninde HICBIR
+# YERDE gecmez ve FR-12'nin kabul kriterleri de sessizdir; bagimsiz
+# dogrulama sonrasi (kullanicinin acikca onayladigi karar) YALNIZCA
+# `--account <id>` formu desteklenir - `AccountRepositoryPort`'a
+# "tek hesabi bul" gibi yeni bir metod EKLENMEZ.
+#
+# `_run_run_command()`, GERCEK adaptorleri (Playwright/Anthropic/OS
+# keychain) `_build_dependencies()` icinde kurar - bu fonksiyon burada
+# monkeypatch ile TAMAMEN degistirilir (tipki `seed()`'in kendi test
+# deseninde oldugu gibi), boylece bu testler hicbir gercek dis sisteme
+# dokunmaz.
+# ---------------------------------------------------------------------------
+
+
+def _run_log(
+    status: RunStatus,
+    *,
+    error_detail: str | None = None,
+    partial_reason: str | None = None,
+) -> RunLog:
+    return RunLog(
+        run_id=uuid4(),
+        account_id=uuid4(),
+        trigger_type=TriggerType.MANUAL,
+        started_at=NOW,
+        ended_at=NOW,
+        jobs_collected=5,
+        jobs_filtered=3,
+        jobs_new=2,
+        jobs_closed=1,
+        status=status,
+        error_detail=error_detail,
+        partial_reason=partial_reason,
+    )
+
+
+def test_report_run_result_prints_summary_and_returns_zero_for_success(capsys):
+    result = _run_log(RunStatus.SUCCESS)
+
+    exit_code = cli._report_run_result(result)
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Success" in out
+    assert "5" in out and "3" in out and "2" in out and "1" in out
+
+
+def test_report_run_result_prints_summary_and_returns_zero_for_partial(capsys):
+    result = _run_log(RunStatus.PARTIAL, partial_reason="devre kesici tetiklendi")
+
+    exit_code = cli._report_run_result(result)
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Partial" in out
+    assert "devre kesici tetiklendi" in out
+
+
+def test_report_run_result_prints_error_detail_and_returns_one_for_failed(capsys):
+    result = _run_log(RunStatus.FAILED, error_detail="LinkedIn session expired")
+
+    exit_code = cli._report_run_result(result)
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "LinkedIn session expired" in err
+
+
+class _FakeSecretsProvider:
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self._values = dict(values or {})
+
+    def get(self, key: str) -> str | None:
+        return self._values.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self._values[key] = value
+
+
+def test_require_secret_returns_the_value_when_present():
+    provider = _FakeSecretsProvider({"anthropic_api_key": "sk-ant-test"})
+
+    assert cli._require_secret(provider, "anthropic_api_key") == "sk-ant-test"
+
+
+def test_require_secret_raises_value_error_naming_the_key_when_missing():
+    provider = _FakeSecretsProvider({})
+
+    with pytest.raises(ValueError, match="anthropic_api_key"):
+        cli._require_secret(provider, "anthropic_api_key")
+
+
+ACCOUNT_ID = uuid4()
+
+
+def test_run_run_command_commits_and_closes_on_success(monkeypatch, capsys):
+    fake_session = _FakeSession()
+    fake_engine = _FakeEngine()
+    fake_dependencies = object()
+    result = _run_log(RunStatus.SUCCESS)
+
+    monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
+    monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
+    monkeypatch.setattr(
+        cli,
+        "_build_dependencies",
+        lambda account_id, session, config_dir, reports_dir, secrets_file: fake_dependencies,
+    )
+    monkeypatch.setattr(
+        cli, "run_account", lambda account_id, dependencies, now, lock_duration: result
+    )
+
+    exit_code = cli._run_run_command(
+        ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json")
+    )
+
+    assert exit_code == 0
+    assert fake_session.committed is False  # run_account/orchestrator.run() KENDI commit eder
+    assert fake_session.rolled_back is False
+    assert fake_session.closed is True
+    assert fake_engine.disposed is True
+    assert "Success" in capsys.readouterr().out
+
+
+def test_run_run_command_prints_message_and_returns_one_when_already_running(
+    monkeypatch, capsys
+):
+    fake_session = _FakeSession()
+    fake_engine = _FakeEngine()
+
+    def _raise_already_running(account_id, dependencies, now, lock_duration):
+        raise RunAlreadyInProgressError(f"Hesap icin zaten bir calistirma suruyor: {account_id}")
+
+    monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
+    monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
+    monkeypatch.setattr(
+        cli,
+        "_build_dependencies",
+        lambda account_id, session, config_dir, reports_dir, secrets_file: object(),
+    )
+    monkeypatch.setattr(cli, "run_account", _raise_already_running)
+
+    exit_code = cli._run_run_command(
+        ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json")
+    )
+
+    assert exit_code == 1
+    assert fake_session.rolled_back is True
+    assert fake_session.closed is True
+    assert fake_engine.disposed is True
+    assert "zaten bir calistirma suruyor" in capsys.readouterr().err
+
+
+def test_run_run_command_prints_message_and_returns_one_on_value_error(monkeypatch, capsys):
+    fake_session = _FakeSession()
+    fake_engine = _FakeEngine()
+
+    monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
+    monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
+
+    def _raise_value_error(account_id, session, config_dir, reports_dir, secrets_file):
+        raise ValueError("Secret bulunamadi: 'anthropic_api_key'")
+
+    monkeypatch.setattr(cli, "_build_dependencies", _raise_value_error)
+
+    exit_code = cli._run_run_command(
+        ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json")
+    )
+
+    assert exit_code == 1
+    assert fake_session.rolled_back is True
+    assert fake_session.closed is True
+    assert fake_engine.disposed is True
+    assert "anthropic_api_key" in capsys.readouterr().err
+
+
+def test_run_run_command_rolls_back_closes_and_reraises_on_unexpected_error(monkeypatch):
+    fake_session = _FakeSession()
+    fake_engine = _FakeEngine()
+
+    def _raise_unexpected(account_id, session, config_dir, reports_dir, secrets_file):
+        raise RuntimeError("unexpected boom")
+
+    monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
+    monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
+    monkeypatch.setattr(cli, "_build_dependencies", _raise_unexpected)
+
+    with pytest.raises(RuntimeError, match="unexpected boom"):
+        cli._run_run_command(ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json"))
+
+    assert fake_session.rolled_back is True
+    assert fake_session.closed is True
+    assert fake_engine.disposed is True
+
+
+def test_main_run_command_dispatches_with_account_and_defaults(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "_run_run_command",
+        lambda account_id, config_dir, reports_dir, secrets_file: calls.append(
+            (account_id, config_dir, reports_dir, secrets_file)
+        )
+        or 0,
+    )
+
+    exit_code = cli.main(["run", "--account", str(ACCOUNT_ID)])
+
+    assert exit_code == 0
+    assert calls == [(ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json"))]
+
+
+def test_main_run_command_accepts_custom_paths(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "_run_run_command",
+        lambda account_id, config_dir, reports_dir, secrets_file: calls.append(
+            (account_id, config_dir, reports_dir, secrets_file)
+        )
+        or 0,
+    )
+
+    cli.main(
+        [
+            "run",
+            "--account",
+            str(ACCOUNT_ID),
+            "--config-dir",
+            "/opt/custom-config",
+            "--reports-dir",
+            "/opt/reports",
+            "--secrets-file",
+            "/opt/secrets.json",
+        ]
+    )
+
+    assert calls == [
+        (ACCOUNT_ID, Path("/opt/custom-config"), Path("/opt/reports"), Path("/opt/secrets.json"))
+    ]
+
+
+def test_main_run_command_requires_account_argument():
+    with pytest.raises(SystemExit):
+        cli.main(["run"])
+
+
+def test_main_run_command_propagates_nonzero_exit_code(monkeypatch):
+    monkeypatch.setattr(
+        cli, "_run_run_command", lambda account_id, config_dir, reports_dir, secrets_file: 1
+    )
+
+    assert cli.main(["run", "--account", str(ACCOUNT_ID)]) == 1
