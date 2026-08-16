@@ -127,7 +127,6 @@ import html as html_module
 import json
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -176,33 +175,6 @@ _LISTED_DATE_FOOTER_ITEM_TYPE = "LISTED_DATE"
 _JOB_CARDS_RESPONSE_TIMEOUT_MS = 20 * 1000
 _JOB_DESCRIPTIONS_RESPONSE_TIMEOUT_MS = 20 * 1000
 _RESPONSE_POLL_INTERVAL_MS = 250
-
-# ---------------------------------------------------------------------------
-# GECICI TANI ARACI (M10.2 gozlemlenebilirlik - kullanici talimatiyla acikca
-# onaylandi: "Add temporary instrumentation only... The goal is
-# observability, not implementation."). Asagidaki `_write_diagnostic()` ve
-# onu cagiran noktalar hicbir is kuralini/donus degerini/kontrol akisini
-# DEGISTIRMEZ - yalnizca `fetch_search_results_page()`'in HALIHAZIRDA
-# yaptigi seyleri (hangi yanitlarin geldigi, ne zaman, kac kart ayristigi,
-# hangi return noktasindan cikildigi) `reports/` altinda KALICI bir JSONL
-# dosyasina yazar. `reports/` zaten bind-mount edilmis oldugu icin (bkz.
-# docker-compose.yml) `docker compose run --rm` konteyner cikisinda bu
-# bilgiyi KAYBETMEZ - onceki turun bulgusu tam olarak buydu:
-# `logs/linkedinbot.jsonl` (StructuredLogger'in varsayilan dosyasi) hicbir
-# zaman bind-mount edilmedigi icin ayni sorunu yasiyordu. Yazma HATASI
-# (izin, eksik dizin vb.) best-effort'tur - CAGIRAN IS MANTIGINA ASLA SIZMAZ
-# (StructuredLogger'in kendi "best-effort sozlesmesi" ile ayni ilke).
-# KALICI DEGILDIR - kok neden bulununca kaldirilmalidir.
-_DIAGNOSTIC_LOG_PATH = Path("reports") / "_diag_fetch_search_results_page.jsonl"
-
-
-def _write_diagnostic(record: dict[str, Any]) -> None:
-    with contextlib.suppress(Exception):
-        _DIAGNOSTIC_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"logged_at": datetime.now(UTC).isoformat(), **record})
-        with _DIAGNOSTIC_LOG_PATH.open("a", encoding="utf-8") as diagnostic_file:
-            diagnostic_file.write(line + "\n")
-
 
 class LoginTimeoutError(RuntimeError):
     """Kullanici, `_LOGIN_TIMEOUT_MS` icinde interaktif girisi
@@ -464,14 +436,6 @@ def fetch_search_results_page(
 
     Tarayici, basarili/basarisiz her durumda kapatilir (try/finally).
     """
-    # GECICI TANI ARACI: bkz. `_write_diagnostic()`'in kendi yorumu - bu
-    # blok yalnizca gozlemlenebilirlik icindir, asagidaki hicbir satir
-    # donus degerini/kontrol akisini degistirmez.
-    _diag_fetch_start = time.monotonic()
-
-    def _diag_elapsed_ms() -> float:
-        return round((time.monotonic() - _diag_fetch_start) * 1000, 1)
-
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
@@ -502,7 +466,6 @@ def fetch_search_results_page(
                 # benzer bir isim CAKISMASI tekrar olusursa bile HER IKI
                 # yanitin da (birbirini SESSIZCE ENGELLEMEDEN) dogru
                 # sekilde yakalanabilmesini saglar.
-                _diag_on_response_invoked_at = datetime.now(UTC).isoformat()
                 url = response.url
                 if _JOB_CARDS_RESPONSE_URL_MARKER in url and not captured_cards_body:
                     with contextlib.suppress(Exception):
@@ -514,30 +477,6 @@ def fetch_search_results_page(
                     with contextlib.suppress(Exception):
                         captured_descriptions_body.append(response.text())
 
-                # GECICI TANI ARACI: is mantigini etkilemeyen, salt-okunur
-                # gozlem. `response.text()` burada AYRICA cagrilir (yukaridaki
-                # is-mantigi bloklarindan bagimsiz) - Playwright govdeyi
-                # ic dahili bir tamponda tuttugu icin (dogrulanmis) tekrar
-                # okuma guvenlidir; basarisiz olursa best-effort ilkesiyle
-                # yutulur.
-                if _JOB_CARDS_RESPONSE_URL_MARKER in url:
-                    _diag_size: int | None = None
-                    with contextlib.suppress(Exception):
-                        _diag_size = len(response.text())
-                    _write_diagnostic(
-                        {
-                            "event": "job_cards_response_observed",
-                            "url": url,
-                            "response_arrived_at": _diag_on_response_invoked_at,
-                            "on_response_invoked_at": _diag_on_response_invoked_at,
-                            "elapsed_ms_since_fetch_start": _diag_elapsed_ms(),
-                            "response_size_bytes": _diag_size,
-                            "captured_cards_body_populated_after_this_response": bool(
-                                captured_cards_body
-                            ),
-                        }
-                    )
-
             page_obj.on("response", _on_response)
 
             search_url = (
@@ -545,18 +484,9 @@ def fetch_search_results_page(
                 f"&location={quote_plus(location)}"
                 f"&start={page * _RESULTS_PER_PAGE}"
             )
-            _write_diagnostic(
-                {
-                    "event": "fetch_search_results_page_started",
-                    "search_url": search_url,
-                    "location": location,
-                    "keywords": keywords,
-                    "page": page,
-                }
-            )
             try:
                 page_obj.goto(search_url)
-            except PlaywrightTimeoutError as exc:
+            except PlaywrightTimeoutError:
                 # M10.2 duzeltmesi (canli bir Bootstrap calistirmasinda
                 # kanitlanan bir kusur): `goto()`'nun varsayilan
                 # `wait_until="load"` sozu, sayfanin TAM render
@@ -578,44 +508,10 @@ def fetch_search_results_page(
                 # eder - `goto()` yalnizca navigasyonu BASLATAN bir adimdir,
                 # fonksiyonun kendi tamamlanma kosulu DEGILDIR.
                 if not captured_cards_body:
-                    _write_diagnostic(
-                        {
-                            "event": "fetch_search_results_page_exit",
-                            "exit_point": "exception_during_goto",
-                            "exception_repr": repr(exc),
-                            "elapsed_ms_total": _diag_elapsed_ms(),
-                        }
-                    )
                     raise
-                _write_diagnostic(
-                    {
-                        "event": "goto_load_timeout_ignored_cards_already_captured",
-                        "exception_repr": repr(exc),
-                        "elapsed_ms_since_fetch_start": _diag_elapsed_ms(),
-                    }
-                )
-            except Exception as exc:
-                _write_diagnostic(
-                    {
-                        "event": "fetch_search_results_page_exit",
-                        "exit_point": "exception_during_goto",
-                        "exception_repr": repr(exc),
-                        "elapsed_ms_total": _diag_elapsed_ms(),
-                    }
-                )
-                raise
 
             _wait_until(page_obj, lambda: bool(captured_cards_body), _JOB_CARDS_RESPONSE_TIMEOUT_MS)
             if not captured_cards_body:
-                _write_diagnostic(
-                    {
-                        "event": "fetch_search_results_page_exit",
-                        "exit_point": "A",
-                        "reason": "captured_cards_body_still_empty_after_wait",
-                        "num_cards_parsed": None,
-                        "elapsed_ms_total": _diag_elapsed_ms(),
-                    }
-                )
                 # M11.1: bu, LinkedIn'in gercekten bos sonuc dondurdugu
                 # durumdan (asagidaki `if not job_cards:` - orada hala `[]`
                 # donulur) KASITLI olarak farklidir - bkz.
@@ -626,23 +522,7 @@ def fetch_search_results_page(
                     f"keywords={keywords!r}, page={page})."
                 )
             job_cards = _parse_job_cards_response(captured_cards_body[0])
-            _write_diagnostic(
-                {
-                    "event": "job_cards_parsed",
-                    "num_cards_parsed": len(job_cards),
-                    "elapsed_ms_since_fetch_start": _diag_elapsed_ms(),
-                }
-            )
             if not job_cards:
-                _write_diagnostic(
-                    {
-                        "event": "fetch_search_results_page_exit",
-                        "exit_point": "B",
-                        "reason": "parse_job_cards_response_returned_zero_cards",
-                        "num_cards_parsed": 0,
-                        "elapsed_ms_total": _diag_elapsed_ms(),
-                    }
-                )
                 return []
 
             _wait_until(
@@ -670,15 +550,6 @@ def fetch_search_results_page(
                         _JOB_VIEW_URL_TEMPLATE.format(job_id=job_id),
                     )
                 )
-            _write_diagnostic(
-                {
-                    "event": "fetch_search_results_page_exit",
-                    "exit_point": "normal",
-                    "num_cards_parsed": len(job_cards),
-                    "num_results_built": len(results),
-                    "elapsed_ms_total": _diag_elapsed_ms(),
-                }
-            )
             return results
         finally:
             browser.close()
