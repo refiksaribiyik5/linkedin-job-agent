@@ -68,19 +68,22 @@ def _unique_job_and_card() -> tuple[str, str, str]:
     gerekir (aksi halde bir test digerinin ONCEDEN commit ettigi veriyi
     gorur/onunla cakisir).
     """
+    # M10.2 duzeltmesi: `adapters/linkedin/playwright_client.py`'nin ARTIK
+    # urettigi kararli `data-field` semasini yansitir - LinkedIn'in eski
+    # (kirilgan) sinif adlarini DEGIL (bkz. o modulun "Mimari sinir" notu).
     unique = uuid4().hex
     job_url = f"https://www.linkedin.com/jobs/view/{unique}"
     company = f"Acme Corp {unique}"
     card = f"""
-<div>
-  <div class="job-card-title">Sales Executive - Entry Level Program</div>
-  <div class="job-card-company">{company}</div>
-  <div class="job-card-location">Istanbul, Turkey</div>
-  <div class="job-card-date">2 days ago</div>
-  <div class="job-card-description">
+<div data-job-id="{unique}">
+  <span data-field="title">Sales Executive - Entry Level Program</span>
+  <span data-field="company">{company}</span>
+  <span data-field="location">Istanbul, Turkey</span>
+  <span data-field="date">2 days ago</span>
+  <span data-field="description">
     Entry Level opportunity to develop key accounts and drive business growth.
-  </div>
-  <a class="job-card-link" href="{job_url}">View</a>
+  </span>
+  <a data-field="link" href="{job_url}">View</a>
 </div>
 """
     return job_url, company, card
@@ -917,15 +920,15 @@ def test_collection_capped_run_does_not_falsely_close_jobs_from_unreached_querie
     job_url_b = f"https://www.linkedin.com/jobs/view/{unique_b}"
     company_b = f"Other Corp {unique_b}"
     card_b = f"""
-<div>
-  <div class="job-card-title">Marketing Specialist - Entry Level</div>
-  <div class="job-card-company">{company_b}</div>
-  <div class="job-card-location">Istanbul, Turkey</div>
-  <div class="job-card-date">2 days ago</div>
-  <div class="job-card-description">
+<div data-job-id="{unique_b}">
+  <span data-field="title">Marketing Specialist - Entry Level</span>
+  <span data-field="company">{company_b}</span>
+  <span data-field="location">Istanbul, Turkey</span>
+  <span data-field="date">2 days ago</span>
+  <span data-field="description">
     Entry Level marketing role.
-  </div>
-  <a class="job-card-link" href="{job_url_b}">View</a>
+  </span>
+  <a data-field="link" href="{job_url_b}">View</a>
 </div>
 """
     db_session.add(
@@ -1079,15 +1082,15 @@ def test_query_retry_exhaustion_below_circuit_breaker_threshold_does_not_falsely
     job_url_b = f"https://www.linkedin.com/jobs/view/{unique_b}"
     company_b = f"Other Corp {unique_b}"
     card_b = f"""
-<div>
-  <div class="job-card-title">Marketing Specialist - Entry Level</div>
-  <div class="job-card-company">{company_b}</div>
-  <div class="job-card-location">Istanbul, Turkey</div>
-  <div class="job-card-date">2 days ago</div>
-  <div class="job-card-description">
+<div data-job-id="{unique_b}">
+  <span data-field="title">Marketing Specialist - Entry Level</span>
+  <span data-field="company">{company_b}</span>
+  <span data-field="location">Istanbul, Turkey</span>
+  <span data-field="date">2 days ago</span>
+  <span data-field="description">
     Entry Level marketing role.
-  </div>
-  <a class="job-card-link" href="{job_url_b}">View</a>
+  </span>
+  <a data-field="link" href="{job_url_b}">View</a>
 </div>
 """
     db_session.add(

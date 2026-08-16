@@ -42,11 +42,16 @@ olarak yeterlidir, ek bir ayristirici (orn. lxml) KASITLI OLARAK
 eklenmemistir (talimat: "yalnizca RecordExtractor icin gereken minimum
 bagimlilik").
 
-BILINEN SINIRLAMA (M3.1/M3.2/M3.3'un ayni dipnotu burada da gecerlidir):
-asagidaki CSS secicileri (`_TITLE_SELECTOR` vb.), LinkedIn'in GERCEK,
-GUNCEL DOM yapisina karsi CANLI olarak dogrulanamamistir (bu ortamda
-gercek bir LinkedIn hesabina/tarayiciya erisim yoktur). Bu, kullanicinin
-gercek hesabina karsi manuel olarak dogrulanmasi gereken bir varsayimdir.
+BILINEN SINIRLAMA (M3.1/M3.2/M3.3'un ayni dipnotu burada da gecerlidir, M10.2'de
+canli olarak dogrulanip duzeltildi): asagidaki secicilerin (`_TITLE_SELECTOR`
+vb.) ESKI hali dogrudan LinkedIn'in kendi CSS sinif adlarini hedefliyordu ve
+CANLI olarak dogrulanamamisti - M10.2'nin ilk gercek calistirmasi bunun
+LinkedIn'in artik hash'lenmis, anlamsiz sinif adlari kullandigini (dolayisiyla
+`jobs_collected=0` uretti) ortaya cikardi. Duzeltme, LinkedIn'in DOM'una
+dogrudan bagimliligi TAMAMEN kaldirir: bu secicilerin GUNCEL hali, BIZIM
+`adapters/linkedin/playwright_client.py`'de tanimladigimiz kararli
+`data-field` semasini hedefler (bkz. o modulun "Mimari sinir" notu) -
+LinkedIn'in kendi HTML'i artik bu dosyaya HICBIR ZAMAN sizmaz.
 
 M3.5 (RateLimiter, TDD Section 22) `_apply_rate_limit()`'i ekler ve
 `collect_raw_job_cards()`'in kendi istek dongusune baglar: `linkedin_port.search_jobs_page()`'e
@@ -99,12 +104,19 @@ from linkedinbot.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
-_TITLE_SELECTOR = ".job-card-title"
-_COMPANY_SELECTOR = ".job-card-company"
-_LOCATION_SELECTOR = ".job-card-location"
-_DATE_SELECTOR = ".job-card-date"
-_DESCRIPTION_SELECTOR = ".job-card-description"
-_LINK_SELECTOR = "a.job-card-link"
+# M10.2 duzeltmesi: bu secicilerin ARTIK LinkedIn'in kendi (kirilgan, hash'li)
+# DOM'una HICBIR bagimliligi yoktur - `adapters/linkedin/playwright_client.py`
+# (bkz. o modulun "Mimari sinir" notu) LinkedIn'in ham HTML'ini asla buraya
+# sizdirmaz, bunun yerine BIZIM tanimladigimiz bu kararli `data-field`
+# semasina sahip sentetik bir HTML uretir. Bu dosya bu yuzden LinkedIn DOM'u
+# yeniden degisse bile DEGISMEZ kalmalidir - butun oynaklik yukaridaki
+# adaptor dosyasinda izole edilmistir.
+_TITLE_SELECTOR = '[data-field="title"]'
+_COMPANY_SELECTOR = '[data-field="company"]'
+_LOCATION_SELECTOR = '[data-field="location"]'
+_DATE_SELECTOR = '[data-field="date"]'
+_DESCRIPTION_SELECTOR = '[data-field="description"]'
+_LINK_SELECTOR = '[data-field="link"]'
 
 
 def _build_search_keywords(titles: list[str]) -> str:

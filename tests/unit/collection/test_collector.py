@@ -586,24 +586,28 @@ def test_collect_raw_job_cards_a_successful_request_resets_the_consecutive_failu
 # ciktisi (ham HTML dizeleri) uzerinde AYRI, sonraki bir adim olarak calisir.
 # ---------------------------------------------------------------------------
 
+# M10.2 duzeltmesi: fixture, `adapters/linkedin/playwright_client.py`'nin
+# ARTIK urettigi sentetik HTML semasini (data-job-id + alan basina
+# data-field, bkz. o modulun "Mimari sinir" notu) yansitir - LinkedIn'in
+# kendi (eski, kirilgan) sinif adlarini DEGIL.
 WELL_FORMED_CARD = """
-<div class="job-card-container">
-  <h3 class="job-card-title">Sales Executive</h3>
-  <span class="job-card-company">Acme Corp</span>
-  <span class="job-card-location">Istanbul, Turkey</span>
-  <time class="job-card-date">3 days ago</time>
-  <p class="job-card-description">We are looking for a Sales Executive to join our team.</p>
-  <a class="job-card-link" href="https://www.linkedin.com/jobs/view/12345">View</a>
+<div data-job-id="12345">
+  <span data-field="title">Sales Executive</span>
+  <span data-field="company">Acme Corp</span>
+  <span data-field="location">Istanbul, Turkey</span>
+  <span data-field="date">3 days ago</span>
+  <span data-field="description">We are looking for a Sales Executive to join our team.</span>
+  <a data-field="link" href="https://www.linkedin.com/jobs/view/12345">View</a>
 </div>
 """
 
 
-def _card_missing(field_class: str) -> str:
-    """WELL_FORMED_CARD'in bir kopyasini, verilen alan sinifina sahip
-    elemani tamamen kaldirarak uretir (o alanin HIC bulunamadigi durumu
-    simule eder)."""
+def _card_missing(field_name: str) -> str:
+    """WELL_FORMED_CARD'in bir kopyasini, verilen `data-field` degerine
+    sahip elemani tamamen kaldirarak uretir (o alanin HIC bulunamadigi
+    durumu simule eder)."""
     soup = BeautifulSoup(WELL_FORMED_CARD, "html.parser")
-    element = soup.select_one(f".{field_class}") or soup.select_one(field_class)
+    element = soup.select_one(f'[data-field="{field_name}"]')
     if element is not None:
         element.decompose()
     return str(soup)
@@ -624,43 +628,43 @@ def test_extract_record_extracts_all_minimum_fields_from_well_formed_card():
 
 def test_extract_record_raises_partial_record_error_when_title_missing():
     with pytest.raises(PartialRecordError, match="title"):
-        extract_record(_card_missing("job-card-title"))
+        extract_record(_card_missing("title"))
 
 
 def test_extract_record_raises_partial_record_error_when_company_missing():
     with pytest.raises(PartialRecordError, match="company"):
-        extract_record(_card_missing("job-card-company"))
+        extract_record(_card_missing("company"))
 
 
 def test_extract_record_raises_partial_record_error_when_location_missing():
     with pytest.raises(PartialRecordError, match="location"):
-        extract_record(_card_missing("job-card-location"))
+        extract_record(_card_missing("location"))
 
 
 def test_extract_record_raises_partial_record_error_when_date_missing():
     with pytest.raises(PartialRecordError, match="posted_date"):
-        extract_record(_card_missing("job-card-date"))
+        extract_record(_card_missing("date"))
 
 
 def test_extract_record_raises_partial_record_error_when_description_missing():
     with pytest.raises(PartialRecordError, match="description"):
-        extract_record(_card_missing("job-card-description"))
+        extract_record(_card_missing("description"))
 
 
 def test_extract_record_raises_partial_record_error_when_link_missing():
     with pytest.raises(PartialRecordError, match="link"):
-        extract_record(_card_missing("job-card-link"))
+        extract_record(_card_missing("link"))
 
 
 def test_extract_record_raises_partial_record_error_when_field_present_but_empty():
     card = """
-    <div class="job-card-container">
-      <h3 class="job-card-title">   </h3>
-      <span class="job-card-company">Acme Corp</span>
-      <span class="job-card-location">Istanbul, Turkey</span>
-      <time class="job-card-date">3 days ago</time>
-      <p class="job-card-description">Some description.</p>
-      <a class="job-card-link" href="https://www.linkedin.com/jobs/view/12345">View</a>
+    <div data-job-id="12345">
+      <span data-field="title">   </span>
+      <span data-field="company">Acme Corp</span>
+      <span data-field="location">Istanbul, Turkey</span>
+      <span data-field="date">3 days ago</span>
+      <span data-field="description">Some description.</span>
+      <a data-field="link" href="https://www.linkedin.com/jobs/view/12345">View</a>
     </div>
     """
     with pytest.raises(PartialRecordError, match="title"):
@@ -668,7 +672,7 @@ def test_extract_record_raises_partial_record_error_when_field_present_but_empty
 
 
 def test_extract_records_skips_broken_card_and_processes_others():
-    broken_card = _card_missing("job-card-title")
+    broken_card = _card_missing("title")
     raw_cards = [WELL_FORMED_CARD, broken_card, WELL_FORMED_CARD]
 
     records = extract_records(raw_cards)
@@ -680,7 +684,7 @@ def test_extract_records_skips_broken_card_and_processes_others():
 
 
 def test_extract_records_logs_a_warning_when_a_card_is_skipped(caplog):
-    broken_card = _card_missing("job-card-title")
+    broken_card = _card_missing("title")
 
     with caplog.at_level(logging.WARNING):
         extract_records([broken_card])
@@ -695,7 +699,7 @@ def test_extract_records_returns_empty_list_for_empty_input():
 def test_extract_records_preserves_order_of_successfully_extracted_records():
     first_card = WELL_FORMED_CARD.replace("Sales Executive", "First Job")
     second_card = WELL_FORMED_CARD.replace("Sales Executive", "Second Job")
-    broken_card = _card_missing("job-card-title")
+    broken_card = _card_missing("title")
 
     records = extract_records([first_card, broken_card, second_card])
 
