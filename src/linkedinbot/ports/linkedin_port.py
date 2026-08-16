@@ -92,4 +92,9 @@ class LinkedInPort(ABC):
         gelir. Kalici bir oturum yoksa/gecersizse `SessionInvalidError`
         firlatilir - Collection (bu metod), pipeline'da Session
         Validation'dan (M3.2) SONRA calisir (PRD Workflow adim 2->3).
+        Bir aktarim/erisim sorunu (orn. beklenen yanit hic gelmedi, M11.1)
+        `SessionInvalidError` DISINDA bir istisna olarak firlatilabilir -
+        cagiran (`collection/collector.py`) bunu mevcut retry/devre-kesici
+        mekanizmasina (M9.4) gore ele alir; bos liste dönüşü YALNIZCA
+        gercek, GELMIS bir yanitin sifir sonuc icerdigi anlamina gelir.
         """

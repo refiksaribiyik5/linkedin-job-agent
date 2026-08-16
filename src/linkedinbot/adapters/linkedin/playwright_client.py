@@ -209,6 +209,19 @@ class LoginTimeoutError(RuntimeError):
     tamamlamadi (ana akis sayfasina ulasilamadi)."""
 
 
+class JobCardsResponseTimeoutError(RuntimeError):
+    """M11.1 (Roadmap Faz 11, Toplama Anomali Tespiti): `_JOB_CARDS_RESPONSE_TIMEOUT_MS`
+    icinde beklenen Job Cards ag yaniti hic gelmedi - `fetch_search_results_page()`
+    KASITLI OLARAK bunu, LinkedIn'in gercekten bos bir sonuc kumesi
+    dondurdugu (bir yanit geldi ama `_parse_job_cards_response()` sifir
+    kart uretti) durumundan AYIRT eder: ikincisi hala `[]` doner (sayfalamanin
+    dogal sonu icin GECERLI bir sinyal), ama bu istisna bir aktarim/erisim
+    sorunudur ve `collector.py::_fetch_page_with_retry()`'nin (M9.4) mevcut
+    `TransientError`/retry/devre-kesici zincirine (hicbir degisiklik
+    GEREKMEDEN - `SessionInvalidError` DISINDAKI herhangi bir istisnayi
+    zaten bu sekilde ele alir) dogrudan akar."""
+
+
 def perform_interactive_login() -> dict[str, Any]:
     """Gorunur bir tarayici acar, kullanicinin interaktif olarak giris
     yapmasini bekler, basarili giris sonrasi Playwright `storage_state`'i
@@ -437,11 +450,17 @@ def fetch_search_results_page(
     kendisi karar verir.
 
     Bos liste, bu sorgu icin `page`'de hicbir ilan karti bulunmadigi
-    anlamina gelir (sayfalamanin dogal sonu icin kullanilan sinyal) - hem
-    "gercekten sifir sonuc" hem "kart yaniti hic gelmedi" (zaman asimi)
-    durumlarinda AYNI sekilde ele alinir; ikisini ayirt etmek Run Log'un
-    kendi anomali izleme sorumlulugudur (TDD Section 9 "RISK-2"), bu
-    fonksiyonun degil.
+    anlamina gelir (sayfalamanin dogal sonu icin kullanilan sinyal) -
+    YALNIZCA bir Job Cards yaniti GERCEKTEN geldiginde ve sifir kart
+    icerdiginde (LinkedIn'in kendisi bos bir sonuc kumesi dondurdugunde).
+
+    M11.1 duzeltmesi (Roadmap Faz 11, TDD Section 9 "RISK-2"nin nihayet
+    ele alinmasi): yanitin HIC gelmemesi (zaman asimi) ARTIK bu bos-liste
+    sinyaliyle KARISTIRILMAZ - `JobCardsResponseTimeoutError` firlatilir.
+    Bu, `collector.py::_fetch_page_with_retry()`'nin mevcut retry/devre-
+    kesici zincirine (M9.4) otomatik olarak akar - `SessionInvalidError`
+    DISINDAKI her istisnayi zaten `TransientError`e cevirip yeniden
+    dener, bu yuzden `collector.py`'de hicbir degisiklik GEREKMEZ.
 
     Tarayici, basarili/basarisiz her durumda kapatilir (try/finally).
     """
@@ -597,7 +616,15 @@ def fetch_search_results_page(
                         "elapsed_ms_total": _diag_elapsed_ms(),
                     }
                 )
-                return []
+                # M11.1: bu, LinkedIn'in gercekten bos sonuc dondurdugu
+                # durumdan (asagidaki `if not job_cards:` - orada hala `[]`
+                # donulur) KASITLI olarak farklidir - bkz.
+                # `JobCardsResponseTimeoutError`'in kendi dokumani.
+                raise JobCardsResponseTimeoutError(
+                    f"Job Cards ag yaniti {_JOB_CARDS_RESPONSE_TIMEOUT_MS // 1000} "
+                    f"saniye icinde hic gelmedi (location={location!r}, "
+                    f"keywords={keywords!r}, page={page})."
+                )
             job_cards = _parse_job_cards_response(captured_cards_body[0])
             _write_diagnostic(
                 {

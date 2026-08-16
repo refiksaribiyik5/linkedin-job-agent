@@ -21,6 +21,7 @@ from linkedinbot.adapters.linkedin.playwright_client import (
     LOGIN_URL,
     SEARCH_URL,
     SESSION_CHECK_URL,
+    JobCardsResponseTimeoutError,
     LoginTimeoutError,
     _build_synthetic_card_html,
     _format_listed_date,
@@ -487,16 +488,20 @@ def test_fetch_search_results_page_first_page_starts_at_zero(monkeypatch):
     assert "start=0" in page.goto_calls[0]
 
 
-def test_fetch_search_results_page_returns_empty_list_when_no_cards_response_arrives(
+def test_fetch_search_results_page_raises_when_no_cards_response_arrives(
     monkeypatch,
 ):
-    # Bos liste = bu sorgu icin sayfalamanin dogal sonu (bkz. collector.py) -
-    # yanit hic gelmezse de AYNI sekilde ele alinir (bkz. modul dokumaninin
-    # "RISK-2" notu).
+    # M11.1 (Roadmap Faz 11): yanit hic gelmemesi (zaman asimi) artik
+    # sayfalamanin dogal sonuyla (bos liste) KARISTIRILMAZ - bu bir
+    # aktarim/erisim sorunudur ve collector.py'nin retry/devre-kesici
+    # mekanizmasina akmasi icin bir istisna olarak firlatilmalidir (bkz.
+    # asagidaki "cards_response_has_zero_elements" testi - GERCEKTEN
+    # gelen ama sifir kart iceren bir yanit hala `[]` doner).
     monkeypatch.setattr(module_under_test, "_JOB_CARDS_RESPONSE_TIMEOUT_MS", 50)
     _page, _context, _browser, _chromium = _install_fake_playwright(monkeypatch, response_events=[])
 
-    assert fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0) == []
+    with pytest.raises(JobCardsResponseTimeoutError):
+        fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
 
 
 def test_fetch_search_results_page_returns_empty_list_when_cards_response_has_zero_elements(
