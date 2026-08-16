@@ -498,10 +498,15 @@ def test_fetch_search_results_page_raises_when_no_cards_response_arrives(
     # asagidaki "cards_response_has_zero_elements" testi - GERCEKTEN
     # gelen ama sifir kart iceren bir yanit hala `[]` doner).
     monkeypatch.setattr(module_under_test, "_JOB_CARDS_RESPONSE_TIMEOUT_MS", 50)
-    _page, _context, _browser, _chromium = _install_fake_playwright(monkeypatch, response_events=[])
+    _page, _context, browser, _chromium = _install_fake_playwright(monkeypatch, response_events=[])
 
     with pytest.raises(JobCardsResponseTimeoutError):
         fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+
+    # Diger her istisna-firlatma yolu icin zaten dogrulanan AYNI paylasilan
+    # finally: browser.close() garantisi - bkz.
+    # test_fetch_search_results_page_closes_browser_even_if_navigation_fails.
+    assert browser.closed is True
 
 
 def test_fetch_search_results_page_returns_empty_list_when_cards_response_has_zero_elements(
