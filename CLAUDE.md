@@ -4,11 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository State
 
-This repository currently contains **only a Product Requirements Document** (`LinkedInBot-PRD.md`) — there is no source code, build system, package manifest, test suite, or git history yet. It is not yet a git repository. There are no build/lint/test commands to run because no implementation exists.
+This repository contains a full working implementation of LinkedInBot V1 (`LinkedInBot-Roadmap.md` milestones M1 through M10.2), validated end-to-end against a real LinkedIn account and real config in a Bootstrap run. It is a git repository with full commit history. The tech stack is decided and built out: Python, Playwright, PostgreSQL, Docker Compose, Anthropic (LLM), APScheduler — see `LinkedInBot-TDD.md` for the full technology-decision record.
 
-When asked to start implementing, treat `LinkedInBot-PRD.md` as the authoritative spec for *what* and *why*, but note that the PRD explicitly leaves the implementation platform, architecture, and workflow/node structure undefined ("Section kapsamı dışı" — deferred to a future Technical Design doc). This means:
-- No tech stack, language, or automation platform (e.g. n8n, Python script, LangChain, etc.) has been decided yet. Ask before assuming one.
-- Do not treat any part of the PRD as implying a specific framework — it is intentionally tool-agnostic.
+The project is currently completing **Faz 11 (Production Hardening)** and **Faz 12 (Production Verification)** in `LinkedInBot-Roadmap.md` — a small, deliberately minimal set of pre-deployment fixes and unattended-operation checks identified during a production-readiness review. Once those land, V1 is feature-complete for its actual deployment model (one technical user, localhost, Docker, no external customers, no SaaS) and the project moves from active development to daily operational use. A larger set of possible improvements was identified during that same review and intentionally postponed — see the Roadmap's "Ertelenen Kapsam" (Postponed Scope) section for what was cut and why.
 
 ## Product Summary
 

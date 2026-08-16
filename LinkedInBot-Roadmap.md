@@ -210,6 +210,8 @@ Bu belge, TDD'de tanımlanan mimariyi **küçük, bağımsız olarak uygulanabil
 - **Tamamlanma Doğrulaması:** Birim testi — yalnızca görüntülenme sayısı gibi oynak bir alanı farklı olan iki fixture aynı hash'i üretir; Description'ı farklı bir üçüncü fixture farklı hash üretir.
 - **Tahmini Süre:** 3–4 saat.
 
+> **Üstünlük notu (sonradan eklendi, Faz 11 incelemesi sırasında — orijinal metin değiştirilmedi):** `normalizer.py`'nin kendi modül dokümanı, `posted_date`'in KASITLI olarak `collected_at` ile eşitlendiğini belgeler — M4.1 zamanında ham kayıt yalnızca güvenilir biçimde ayrıştırılamayan göreli bir görüntü dizesi ("3 days ago") taşıyordu, bu yüzden bu KARARI o zaman DOĞRUYDU. M10.2'nin `playwright_client.py` yeniden yazımı (bkz. Faz 10), LinkedIn'in kendi API'sinden gerçek, kesin bir `LISTED_DATE` zaman damgası çıkarmaya başladı — M4.1'in kararının dayandığı önkoşul artık geçerli değildir. Bkz. M11.2 (Faz 11) — bu üstünlüğü ele alan düzeltme.
+
 ### M4.2 — Geçmişle Çapraz Kontrol (Diff Engine)
 - **Amaç:** Her ilanı New/Seen/Updated/Closed durumlarından birine atamak.
 - **Oluşturulacak Dosyalar:** `history/diff_engine.py`, `history/content_hasher.py`.
@@ -452,6 +454,91 @@ Bu belge, TDD'de tanımlanan mimariyi **küçük, bağımsız olarak uygulanabil
 
 ---
 
+## Faz 11 — Production Hardening
+
+**Bağlam:** M10.2'nin Bootstrap çalıştırması gerçek veriyle uçtan uca başarıyla tamamlandı (bkz. M10.2). Ardından yürütülen bir dizi production-readiness incelemesi (Production Hardening Review, bağımsız Staff Engineer incelemesi, roadmap'in red-team incelemesi, deployment-readiness kararı, Data Integrity denetimi) çok sayıda potansiyel iyileştirme belirledi. **Bu iyileştirmeler bilinçli olarak elendi** — projenin gerçek dağıtım modeli (tek teknik kullanıcı, localhost, Docker, harici müşteri yok, SaaS şu an kapsam dışı) göz önüne alındığında, yalnızca aşağıdaki 5 madde "gözetimsiz çalıştırma için gerçekten gerekli" eşiğini geçti. Elenen geri kalan her şey, gerekçesiyle birlikte bu Faz'ın sonundaki **"Ertelenen Kapsam"** bölümünde listelenmiştir — hiçbiri belirsiz bırakılmamıştır.
+
+Bu Faz KASITLI OLARAK küçüktür: her madde, mühendislik mükemmelliği için değil, "bu olmadan gözetimsiz çalıştırma güvenilir değildir" testini geçtiği için buradadır.
+
+### M11.1 — Toplama Anomali Tespiti ve Retry Doğruluğu
+- **Amaç:** "Job Cards ağ yanıtı hiç gelmedi" durumunu "LinkedIn gerçekten sıfır sonuç döndürdü" durumundan ayırt etmek; ilkini mevcut retry/devre-kesici mekanizmasına (M9.4) yönlendirmek.
+- **Oluşturulacak Dosyalar:** Yok — mevcut dosyalar değiştirilir: `adapters/linkedin/playwright_client.py` (`fetch_search_results_page()`'in dönüş sözleşmesi), gerekirse `ports/linkedin_port.py`, `collection/collector.py` (`collect_raw_job_cards`'ın basarisizlik siniflandirmasi).
+- **Bileşenler:** Collection Service, LinkedInPort.
+- **Bağımlılıklar:** M10.2 (M10.2'nin canlı Bootstrap çalıştırması, `goto()` zaman aşımı düzeltmesi sonrasında bile 7 sorgudan 6'sının hiç yanıt almadığını ve retry'a HİÇ girmediğini kanıtladı — bu bulgu bu maddenin doğrudan gerekçesidir).
+- **Beklenen Sonuç:** "Yanıt hiç gelmedi" durumu artık retry bütçesini (`linkedin_retry_attempts`) tüketir ve devre kesiciyi tetikleyebilir; gerçek "sıfır kart" durumu (LinkedIn'in kendisi boş bir sayfa döndürdüğünde) sayfalamanın doğal sonu olarak DEĞİŞMEDEN kalır — ikisi asla birbirine karıştırılmaz.
+- **Tamamlanma Doğrulaması:** Sahte bir `LinkedInPort` ile iki durumu ayırt eden birim testleri (biri retry/devre-kesiciyi tetikler, diğeri tetiklemez); canlı bir Bootstrap çalıştırmasının tanı çıktısı, en az bir sorgunun artık retry'a girdiğini gösterir.
+- **Tahmini Süre:** 4–6 saat.
+
+### M11.2 — Yayın Tarihi Doğruluğu
+- **Amaç:** `posted_date`'i her zaman `collected_at` ile eşitlemek yerine, M10.2'nin mimari evriminde artık mevcut olan gerçek `LISTED_DATE` sinyalini kullanmak.
+- **Oluşturulacak Dosyalar:** Yok — `normalization/normalizer.py` değiştirilir.
+- **Bileşenler:** Normalization Service.
+- **Bağımlılıklar:** M10.2 (gerçek tarih sinyali, M4.1'in kendi kapsam kararı sırasında HENÜZ mevcut değildi — M10.2'nin `playwright_client.py` yeniden yazımı bunu sonradan sağladı; bkz. M4.1'e ekli üstünlük notu).
+- **Beklenen Sonuç:** Ham kayıtta gerçek bir tarih mevcutsa `JobPosting.posted_date` onu yansıtır; yoksa mevcut `collected_at` yedek davranışı KORUNUR. `content_hash` etkilenmez (FR-14 zaten göreli zaman ifadelerini hariç tutar).
+- **Tamamlanma Doğrulaması:** Birim testi — gerçek tarihli bir ham kayıt doğru `posted_date` üretir; aynı girdi için `content_hash` değişmeden kalır.
+- **Tahmini Süre:** 1–2 saat.
+
+### M11.3 — Başarısızlık Görünürlüğü (bildirim altyapısı OLMADAN)
+- **Amaç:** Zamanlanmış bir çalıştırma `SessionInvalidError` ile başarısız olduğunda, kullanıcının fark edebileceği minimal, tek-makineye-özgü bir sinyal üretmek — genel bir bildirim SİSTEMİ İNŞA ETMEDEN (bkz. Ertelenen Kapsam).
+- **Oluşturulacak Dosyalar:** Yok — `main.py`'nin `_on_trigger`/hata yolu değiştirilir.
+- **Bileşenler:** `main.py` (scheduler döngüsü).
+- **Bağımlılıklar:** Yok.
+- **Beklenen Sonuç:** `TriggerType.SCHEDULED` bir çalıştırma `SessionInvalidError` ile başarısız olduğunda, tek native bir sinyal (örn. macOS'un kendi `display notification` mekanizması) tetiklenir — yeni bir kuyruk/webhook/e-posta altyapısı EKLENMEZ; bu, PRD Section 18'in Faz 2 kapsamındaki "bildirimler" özelliğiyle KARIŞTIRILMAMALIDIR (bu madde ona bir alt-yapı İNŞA ETMEZ, yalnızca tek, sabit-kodlu bir yerel sinyal ekler).
+- **Tamamlanma Doğrulaması:** `SessionInvalidError` fırlatan sahte bir tetikleyici ile birim testi, yan etkinin tam olarak bir kez tetiklendiğini doğrular.
+- **Tahmini Süre:** 1 saat.
+
+### M11.4 — Tanı Aracı Temizliği
+- **Amaç:** M10.2 araştırması sırasında eklenen geçici `_write_diagnostic()` enstrümantasyonunu kaldırmak (kendi yorumunda "kök neden bulununca kaldırılmalıdır" olarak işaretlenmişti — kök neden artık bulundu ve M11.1 onu düzeltiyor).
+- **Oluşturulacak Dosyalar:** Yok — `adapters/linkedin/playwright_client.py`'den kaldırılır.
+- **Bileşenler:** `adapters.linkedin`.
+- **Bağımlılıklar:** Yok (M11.1 ile aynı dosyayı değiştirdiği için birlikte uygulanması önerilir, ama teknik bir bağımlılık yoktur).
+- **Beklenen Sonuç:** `fetch_search_results_page()`'in sıcak yolunda koşulsuz disk yazımı kalmaz; mevcut testler davranış olarak değişmeden geçer; `reports/` altında sınırsız büyüyen bir tanı dosyası riski ortadan kalkar.
+- **Tamamlanma Doğrulaması:** `grep -c "_write_diagnostic" src/linkedinbot/adapters/linkedin/playwright_client.py` sıfır döner; tam test paketi yeşil kalır.
+- **Tahmini Süre:** 30 dakika.
+
+### M11.5 — Colima Yeniden Başlatma Sonrası Otomatik Başlatma
+- **Amaç:** Host makinesi (macOS) yeniden başlatıldığında Colima'nın (dolayısıyla Docker daemon'ının ve `restart: unless-stopped` politikasına sahip `app` konteynerinin) manuel müdahale olmadan otomatik başlamasını sağlamak.
+- **Oluşturulacak Dosyalar:** Bir macOS LaunchAgent `.plist` dosyası (host-özel kurulum, repo koduna dahil değildir) — `scripts/` altına isteğe bağlı bir kurulum betiği eklenebilir.
+- **Bileşenler:** Dağıtım altyapısı (kod tabanı dışı, host konfigürasyonu).
+- **Bağımlılıklar:** Yok.
+- **Beklenen Sonuç:** Host yeniden başlatıldığında (örn. bir macOS güvenlik güncellemesi sonrası) Colima ve `app` konteyneri manuel müdahale olmadan çalışır duruma gelir — bu doğrulanmadan, `restart: unless-stopped` politikasının kendisi hiçbir işe yaramaz, çünkü Docker daemon'ının kendisi hiç başlamamış olur.
+- **Tamamlanma Doğrulaması:** Gerçek bir host yeniden başlatması sonrası `docker ps`'in `app` konteynerini "Up" durumunda gösterdiği doğrulanır.
+- **Tahmini Süre:** 30 dakika.
+
+---
+
+## Faz 12 — Production Verification
+
+**Bağlam:** M10.1'in kendi Tamamlanma Doğrulaması ("temiz bir makinede/VM'de soğuk başlatma yapılır; tohumlanmış hesap, zamanlanmış bir çalıştırma ve bir yedek dosyasının... manuel müdahale olmadan ortaya çıktığı doğrulanır") bu roadmap'te tanımlandığı haliyle **gerçek hesaba karşı hiç yapılmamıştır** — bu proje boyunca yürütülen HER doğrulama, `docker compose run --rm` (CLI/manuel tetikleme yolu, `TriggerType.MANUAL`) üzerinden gerçekleşmiştir; `docker compose up -d app` (gerçek, uzun-ömürlü scheduler süreci, `TriggerType.SCHEDULED`) hiçbir zaman gerçek hesapla çalıştırılmamıştır (canlı DB sorgusuyla doğrulandı: gerçek hesap için 0 `Scheduled` kayıt, 12 `Manual` kayıt). Aynı şekilde `scripts/backup.sh` hiçbir zaman çalıştırılmamıştır (host'ta crontab kaydı yok, `backups/` dizini mevcut değil). Faz 12, M10.1'in kendi standardını, M11'in düzeltmeleri ışığında, nihayet gerçekleştirir.
+
+### M12 — Gözetimsiz Çalıştırma ve Yedekleme Doğrulaması
+- **Amaç:** Sistemin gerçekten iddia ettiği gibi gözetimsiz çalıştığını ve verinin gerçekten yedeklendiğini, gerçek hesaba karşı ilk kez kanıtlamak.
+- **Oluşturulacak Dosyalar:** Yok — bu M10.2 ile aynı desende bir doğrulama milestone'udur.
+- **Bileşenler:** Sistemin tamamı (`main.py`, `scripts/backup.sh`).
+- **Bağımlılıklar:** M11 (özellikle M11.3 — doğrulanacak sinyal mekanizmasının önce var olması gerekir; M11.5 — Colima'nın host reboot'tan sağ çıktığı, scheduler'ın kendisi test edilmeden ÖNCE doğrulanmalıdır).
+- **Beklenen Sonuç:** `docker compose up -d app` gerçek hesapla çalıştırılır ve en az bir gerçek `TriggerType.SCHEDULED` çalıştırması başarıyla tamamlanıp kalıcı hale gelir; `scripts/backup.sh` host crontab'ına eklenir, manuel olarak bir kez çalıştırılır ve üretilen yedek dosyasının (`gunzip`/`psql` ile) gerçekten geri yüklenebilir olduğu doğrulanır.
+- **Tamamlanma Doğrulaması:** M10.1'in kendi kriteriyle BİREBİR AYNI — tohumlanmış hesap, zamanlanmış bir çalıştırma ve bir yedek dosyası, (tek seferlik LinkedIn girişi dışında) manuel müdahale olmadan ortaya çıkar.
+- **Tahmini Süre:** 1–2 saat (çoğunlukla gözlem/bekleme + crontab kurulumu).
+
+---
+
+## Ertelenen Kapsam (Production Hardening incelemesinden bilinçli olarak elenen maddeler)
+
+Aşağıdaki maddeler, production-readiness inceleme sürecinde (Production Hardening Review, Staff Engineer incelemesi, red-team incelemesi, deployment-readiness kararı, Data Integrity denetimi) tespit edildi, ama **projenin gerçek dağıtım modeli için gerekli görülmediği için bilinçli olarak M11/M12 kapsamı dışında bırakıldı.** Belirsiz bırakılmamaları için burada, gerekçeleriyle birlikte listelenmiştir. Hiçbiri şu an için planlanmamaktadır; gerçek gözetimsiz kullanım bunlardan birinin gerekli olduğunu KANITLARSA, ayrı bir roadmap turunda ele alınabilir.
+
+- **Borderline (sınırda) skorların raporda ayrı bir bölümde gösterilmesi (FR-16'nın tam harfi):** `is_borderline` doğru hesaplanıp kalıcı hale getiriliyor, yalnızca raporda ayrı gösterilmiyor. Her ilanın gerekçe metni (rationale) zaten skorun yanında gösterildiği ve gerçek durumu dürüstçe yansıttığı için (örn. bir örnek raporda "tangential rather than direct" ifadesi), kullanıcıyı aktif olarak yanıltma riski düşük bulundu.
+- **`goto()` zaman aşımının kök nedeninin araştırılması:** Semptom (veri kaybı) M10.2'nin düzeltmesiyle ZATEN giderildi; kök nedenin (neden "load" olayı nadiren tetikleniyor) araştırılması açık uçlu, sınırsız efor gerektiriyor ve mevcut çalışan sistemi iyileştirmiyor, yalnızca verimliliğini artırabilir.
+- **Docker/secrets sertleştirmesi (`POSTGRES_PASSWORD` varsayılanı `changeme`):** Yalnızca localhost, tek kullanıcı, harici erişim yok — bu bağlamda gerçek bir saldırı yüzeyi tespit edilmedi. SaaS/çok-kullanıcılı bir dağıtım söz konusu olursa yeniden değerlendirilmelidir.
+- **Test coverage eşiği zorunluluğu:** Coverage kapıları, başka katkıda bulunanların dikkatsiz regresyonlarına karşı koruma sağlar — bu projede şu an başka katkıda bulunan yoktur.
+- **İlk ilan (currentJobId) için eksik açıklama metni sorunu:** Zaten `PartialRecordError` ile zarifçe (çökmeden, loglanarak) ele alınıyor; sayfa başına en fazla 1 ilanla sınırlı; ek bir düzeltme aranmayacak.
+- **`RunLog.started_at`/`ended_at` süre takibi:** Saf gözlemlenebilirlik iyileştirmesi; tek operatörün gerçek zamanlı olarak çalıştırmaları izlediği bu kullanım deseninde gerçek bir sonucu yok.
+- **Docker'da structured log (`logs/linkedinbot.jsonl`) kalıcılığı:** Tek satırlık bir `docker-compose.yml` düzeltmesi ucuz olsa da, nihai "kabul edilen 6 madde" listesine dahil edilmedi — RunLog + gerektiğinde manuel yeniden çalıştırma bu proje boyunca yeterli sinyal sağladı.
+- **`playwright_client.py` modül dokümanının ve `AIMatchResult.cached_results`'ın (kullanılmayan parametre) temizliği:** Kozmetik/bakım maddeleri, çalışma zamanı davranışını etkilemiyor.
+- **Geliştirme veritabanının test-fixture kalıntılarından temizlenmesi (695 farklı hesap ID'si, gerçek hesabın 12 satırına karşı):** Gerçek hesabın kendi verisine (unique constraint'lerle korunan) bir zarar kanıtlanmadı; salt hijyen meselesi.
+- **Rapor dosyasının, onu kaydeden DB transaction'ından ÖNCE diske yazılması (Data Integrity denetiminin tek bulgusu):** Denetim bunu "DATA INTEGRITY VERIFIED AFTER FIXING 1 ISSUE" sonucuna bağlamıştı, ama nihai 6 maddelik kabul edilen blocker listesine dahil edilmedi. **Bilinçli olarak burada, es geçilmeden, açıkça not düşülmektedir:** düşük olasılıklı (dar bir zaman penceresi gerektirir), düşük-orta etkili (veri kaybı/bozulması yok, yalnızca sahipsiz bir rapor dosyası) bir bulgudur — ama teknik olarak hâlâ açık bir bulgudur ve gelecekte yeniden değerlendirilmelidir.
+
+---
+
 ## Sonraki Adımlar
 
-Bu roadmap yalnızca **V1 (MVP)** kapsamını kapsar. Faz 10 tamamlandığında sistem PRD'nin tüm Must-have ve Should-have gereksinimlerini (FR-1–FR-21, NFR-1–NFR-15) karşılar durumdadır. PRD Section 18'deki Phase 2–4 özellikleri (bildirimler, CV optimizasyonu, vb.) bu roadmap'in kapsamı dışındadır ve TDD Section 29'daki genişletme noktaları üzerinden ayrı bir roadmap turunda ele alınmalıdır.
+Bu roadmap **V1 (MVP)** kapsamını kapsar. Faz 10 (M1–M10.2) sistemin PRD'nin tüm Must-have ve Should-have gereksinimlerini (FR-1–FR-21, NFR-1–NFR-15) karşıladığı noktadır. Faz 11 (Production Hardening) ve Faz 12 (Production Verification), gerçek gözetimsiz kullanıma geçmeden önce tespit edilen, dağıtım modeline göre bilinçli olarak küçük tutulan son düzeltme/doğrulama adımlarıdır — tamamlandıklarında proje **v1 complete** kabul edilir ve geliştirme sürecinden operasyonel öğrenme sürecine geçilir. PRD Section 18'deki Phase 2–4 özellikleri (bildirimler, CV optimizasyonu, vb.) bu roadmap'in kapsamı dışındadır ve TDD Section 29'daki genişletme noktaları üzerinden ayrı bir roadmap turunda ele alınmalıdır.
