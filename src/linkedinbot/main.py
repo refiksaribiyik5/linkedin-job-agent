@@ -80,8 +80,8 @@ from linkedinbot.bootstrap import LOCK_DURATION, build_dependencies, run_account
 from linkedinbot.config.loader import load_account_context
 from linkedinbot.db.engine import create_db_engine, create_session_factory
 from linkedinbot.db.repositories.account_repository import SqlAlchemyAccountRepository
-from linkedinbot.domain.run_log import TriggerType
-from linkedinbot.ports.linkedin_port import SessionInvalidError
+from linkedinbot.domain.run_log import RunStatus, TriggerType
+from linkedinbot.ports.linkedin_port import LinkedInPort, SessionInvalidError
 
 ACCOUNT_ID_ENV_VAR = "ACCOUNT_ID"
 # M11.3 (Roadmap Faz 11, "Basarisizlik Gorunurlugu"): bildirim altyapisi
@@ -121,11 +121,12 @@ def _session_alert_path(reports_dir: Path) -> Path:
 
 
 def _write_session_alert(reports_dir: Path, account_id: UUID) -> None:
-    """M11.3: bir zamanlanmis calistirma `SessionInvalidError` ile
-    basarisiz oldugunda cagrilir. Yazma HATASI (izin, disk dolu vb.)
-    best-effort'tur ve SESSIZCE yutulur - orijinal `SessionInvalidError`'i
-    MASKELEMEZ (StructuredLogger'in kendi "best-effort sozlesmesi" ile
-    ayni ilke, bkz. logging/structured_logger.py modul dokumani)."""
+    """M11.3: bir zamanlanmis calistirma basarisiz olup hesabin oturumu
+    su an gecersiz oldugunda cagrilir (bkz. `_session_is_currently_invalid()`).
+    Yazma HATASI (izin, disk dolu vb.) best-effort'tur ve SESSIZCE yutulur -
+    cagiranin kendi hata isleme akisini MASKELEMEZ (StructuredLogger'in
+    kendi "best-effort sozlesmesi" ile ayni ilke, bkz.
+    logging/structured_logger.py modul dokumani)."""
     with contextlib.suppress(OSError):
         _session_alert_path(reports_dir).write_text(
             "LinkedIn oturumu gecersiz - zamanlanmis calistirmalar bu "
@@ -146,6 +147,45 @@ def _clear_session_alert(reports_dir: Path) -> None:
         _session_alert_path(reports_dir).unlink(missing_ok=True)
 
 
+def _session_is_currently_invalid(
+    linkedin_port: LinkedInPort, account_id: UUID, session: Session
+) -> bool:
+    """M11.3 duzeltmesi (M12'de canli bir zamanlanmis calistirmaya karsi
+    kesfedilen gercek bir kusur - bkz. Roadmap M12 doğrulama notu):
+    `orchestrator.run()` (kendi "merkezi hata siniflandirma noktasi"
+    yorumuna bakiniz) `RunAlreadyInProgressError` DISINDAKI HERHANGI bir
+    istisnayi (`SessionInvalidError` DAHIL) yakalayip bir Failed RunLog
+    yazar ve NORMAL DONER - hic firlatmaz. `bootstrap.run_account()`'un
+    KENDI dokumanindaki "hicbir istisna yakalanmaz, oldugu gibi sizar"
+    varsayimi, `SessionInvalidError` icin YANLIS - bu davranis KASITLI ve
+    `cli._run_run_command`'in KENDI `_report_run_result()`'inin dayandigi,
+    DEGISTIRILMEMESI gereken bir sozlesmedir (degistirilirse CLI'nin hata
+    bicimlendirmesi bozulur).
+
+    **Neden DB'nin `session_status` sutunu DOGRUDAN okunmaz (ilk taslagin
+    kendi hatasi, canli bir entegrasyon testiyle YAKALANDI):**
+    `SessionManager.validate()`, oturum gecersizse `session_status=EXPIRED`'i
+    yalnizca `flush()` eder (COMMIT ETMEZ) ve sonra firlatir (bkz.
+    session_manager.py). Bu istisna `_run_pipeline()`'in ta EN BASINDA
+    (validate(), pipeline'in ilk adimidir) olustugu icin,
+    `orchestrator.run()`'un KENDI `except Exception` dali bu flush'i
+    `dependencies.session.rollback()` ile HENUZ commit edilmeden GERI ALIR
+    - boylece `_on_trigger`'in kendi (AYRI) oturumundan `session_status`'u
+    okumak, gercekte az once gecersizlesmis bir oturum icin bile YANLISLIKLA
+    "valid" doner (kanit: tests/integration/db entegrasyon senaryosu ile
+    dogrulandi). Bu yuzden burada, calistirma basarisiz olduktan SONRA
+    `linkedin_port.validate()` BILEREK IKINCI KEZ cagrilir - taze, otoriter
+    bir cevap alinir VE (istisna varsa) onun flush'i BU KEZ `_on_trigger`'in
+    KENDI oturumunda dogrudan commit edilir (orchestrator.run()'un rollback'i
+    ARTIK araya giremez), boylece DB de dogru sekilde EXPIRED yansitir."""
+    try:
+        linkedin_port.validate(account_id)
+    except SessionInvalidError:
+        session.commit()
+        return True
+    return False
+
+
 def _make_on_trigger(
     config_dir: Path, reports_dir: Path, secrets_file: Path
 ) -> Callable[[UUID], None]:
@@ -159,11 +199,18 @@ def _make_on_trigger(
     `_fire()` bu hatayi zaten yutup loglayacagi icin (bkz. modul dokumani)
     bu yalnizca bu oturumun kendi temizligi icindir.
 
-    M11.3: `SessionInvalidError` ozel olarak yakalanir (genel `except
-    Exception` dalindan ONCE) - rollback/reraise davranisi TUM diger
-    istisna turleri icin DEGISMEDEN kalir, yalnizca BU turde ek olarak
-    `_write_session_alert()` cagrilir. Basarili bir calistirma, ONCEDEN
-    yazilmis olabilecek bir uyariyi `_clear_session_alert()` ile temizler.
+    M11.3 (M12'de duzeltilen bir kusurdan sonra): `run_account()` HER ZAMAN
+    normal doner (`orchestrator.run()` `RunAlreadyInProgressError` DISINDA
+    hicbir istisna firlatmaz - bkz. `_session_is_currently_invalid()`'in
+    kendi dokumani), bu yuzden alarm mantigi bir `except SessionInvalidError`
+    dalina DEGIL, donen `RunLog.status`'a ve calistirma SONRASI `linkedin_port
+    .validate()`'in BILEREK ikinci kez cagrilmasina dayanir (yine
+    `_session_is_currently_invalid()`'in kendi dokumanina bakiniz - DB'nin
+    `session_status` sutununu dogrudan okumak, orchestrator.run()'un kendi
+    rollback'i yuzunden GUVENILMEZDIR). `except Exception` dali (rollback +
+    reraise) yalnizca GERCEKTEN beklenmedik hatalar (orn.
+    `build_dependencies()`'in kendisinin basarisiz olmasi) icindir - TUM
+    diger istisna turleri icin DEGISMEDEN kalir.
     """
 
     def _on_trigger(account_id: UUID) -> None:
@@ -174,14 +221,15 @@ def _make_on_trigger(
             dependencies = build_dependencies(
                 account_id, session, config_dir, reports_dir, secrets_file
             )
-            run_account(
+            result = run_account(
                 account_id, dependencies, datetime.now(UTC), LOCK_DURATION, TriggerType.SCHEDULED
             )
-            _clear_session_alert(reports_dir)
-        except SessionInvalidError:
-            session.rollback()
-            _write_session_alert(reports_dir, account_id)
-            raise
+            if result.status == RunStatus.FAILED and _session_is_currently_invalid(
+                dependencies.linkedin_port, account_id, session
+            ):
+                _write_session_alert(reports_dir, account_id)
+            else:
+                _clear_session_alert(reports_dir)
         except Exception:
             session.rollback()
             raise

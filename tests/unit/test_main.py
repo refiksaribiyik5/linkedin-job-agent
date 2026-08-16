@@ -26,7 +26,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from linkedinbot import main
 from linkedinbot.domain.account import Account
-from linkedinbot.domain.run_log import TriggerType
+from linkedinbot.domain.run_log import RunLog, RunStatus, TriggerType
 from linkedinbot.ports.account_repository_port import AccountRepositoryPort
 from linkedinbot.ports.linkedin_port import SessionInvalidError
 
@@ -140,6 +140,42 @@ def test_resolve_account_id_raises_value_error_when_not_a_valid_uuid():
 # ---------------------------------------------------------------------------
 
 
+class _FakeLinkedInPort:
+    """`_session_is_currently_invalid()`, Failed bir calistirmadan SONRA
+    `linkedin_port.validate()`'i BILEREK ikinci kez cagirir (bkz.
+    `main._session_is_currently_invalid()`'in kendi dokumani - DB'nin
+    `session_status` sutununu dogrudan okumanin, `orchestrator.run()`'un
+    KENDI rollback'i yuzunden GUVENILMEZ oldugu canli bir entegrasyon
+    testiyle KANITLANMASINDAN SONRAKI tasarim). Bu sahte, o ikinci
+    cagrinin basarili mi yoksa `SessionInvalidError` mi firlatacagini
+    test basina yapilandirir."""
+
+    def __init__(self, validate_error: Exception | None = None) -> None:
+        self._validate_error = validate_error
+        self.validate_calls: list[UUID] = []
+
+    def validate(self, account_id: UUID) -> None:
+        self.validate_calls.append(account_id)
+        if self._validate_error is not None:
+            raise self._validate_error
+
+
+class _FakeDependencies:
+    def __init__(self, linkedin_port: _FakeLinkedInPort) -> None:
+        self.linkedin_port = linkedin_port
+
+
+def _run_log(*, account_id: UUID, status: RunStatus, error_detail: str | None = None) -> RunLog:
+    return RunLog(
+        run_id=uuid4(),
+        account_id=account_id,
+        trigger_type=TriggerType.SCHEDULED,
+        started_at=datetime.now(UTC),
+        status=status,
+        error_detail=error_detail,
+    )
+
+
 def test_make_on_trigger_passes_the_scheduled_trigger_type_and_cleans_up(monkeypatch):
     engines, sessions = _patch_db(monkeypatch)
     calls: list[tuple[UUID, TriggerType]] = []
@@ -147,14 +183,12 @@ def test_make_on_trigger_passes_the_scheduled_trigger_type_and_cleans_up(monkeyp
     def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
         return "deps"
 
+    def _fake_run_account(account_id, dependencies, now, lock_duration, trigger_type):
+        calls.append((account_id, trigger_type))
+        return _run_log(account_id=account_id, status=RunStatus.SUCCESS)
+
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
-    monkeypatch.setattr(
-        main,
-        "run_account",
-        lambda account_id, dependencies, now, lock_duration, trigger_type: calls.append(
-            (account_id, trigger_type)
-        ),
-    )
+    monkeypatch.setattr(main, "run_account", _fake_run_account)
 
     on_trigger = main._make_on_trigger(Path("config"), Path("reports"), Path("secrets.json"))
     account_id = uuid4()
@@ -169,6 +203,10 @@ def test_make_on_trigger_passes_the_scheduled_trigger_type_and_cleans_up(monkeyp
 
 
 def test_make_on_trigger_rolls_back_and_still_cleans_up_on_failure(monkeypatch, tmp_path):
+    # Bu, `run_account()`'un kendisinin cagrilamadigi (build_dependencies'in
+    # KENDISI basarisiz oldugu) GERCEKTEN beklenmedik bir hata senaryosudur -
+    # `except Exception` dali (rollback + reraise) hala BUNUN icindir,
+    # M12'de duzeltilen sorundan ETKILENMEZ.
     engines, sessions = _patch_db(monkeypatch)
 
     def _raise(*args, **kwargs):
@@ -186,41 +224,84 @@ def test_make_on_trigger_rolls_back_and_still_cleans_up_on_failure(monkeypatch, 
     assert sessions[0].rollback_count == 1
     assert sessions[0].closed is True
     assert engines[0].disposed is True
-    # M11.3: SessionInvalidError DISINDAKI bir hata icin uyari dosyasi
-    # YAZILMAMALIDIR - yalnizca SessionInvalidError'a ozeldir.
     assert not (tmp_path / "NEEDS_LOGIN.txt").exists()
 
 
-def test_make_on_trigger_writes_a_session_alert_on_session_invalid_error(monkeypatch, tmp_path):
-    # Roadmap M11.3'un kendi "Tamamlanma Dogrulamasi": SessionInvalidError
-    # firlatan sahte bir tetikleyici ile, yan etkinin (uyari dosyasi)
-    # tam olarak bir kez tetiklendigi dogrulanir.
+def test_make_on_trigger_writes_a_session_alert_when_revalidation_confirms_session_invalid(
+    monkeypatch, tmp_path
+):
+    # M12 duzeltmesi: `run_account()` (gercekte, `orchestrator.run()`
+    # araciligiyla) `SessionInvalidError` firlatmaz - Failed bir RunLog
+    # DONER. Alarm mantigi bunun uzerine, VE `linkedin_port.validate()`'in
+    # calistirma SONRASI BILEREK ikinci kez cagrilmasinin sonucuna kurulur
+    # (bkz. `main._session_is_currently_invalid()` - DB'nin `session_status`
+    # sutununu dogrudan okumak, `orchestrator.run()`'un KENDI rollback'i
+    # yuzunden GUVENILMEZ bulundu, bkz. o fonksiyonun kendi dokumani).
+    account_id = uuid4()
     engines, sessions = _patch_db(monkeypatch)
+    fake_port = _FakeLinkedInPort(validate_error=SessionInvalidError("oturum gecersiz"))
 
     def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
-        return "deps"
+        return _FakeDependencies(fake_port)
 
-    def _raise_session_invalid(*args, **kwargs):
-        raise SessionInvalidError("oturum gecersiz")
+    def _fake_run_account(*args, **kwargs):
+        return _run_log(
+            account_id=account_id, status=RunStatus.FAILED, error_detail="oturum gecersiz"
+        )
 
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
-    monkeypatch.setattr(main, "run_account", _raise_session_invalid)
+    monkeypatch.setattr(main, "run_account", _fake_run_account)
 
     on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
-    account_id = uuid4()
 
-    with pytest.raises(SessionInvalidError):
-        on_trigger(account_id)
+    on_trigger(account_id)  # artik hicbir sey FIRLATMAZ - Failed durum normal donustur
 
     alert_path = tmp_path / "NEEDS_LOGIN.txt"
     assert alert_path.exists()
     content = alert_path.read_text(encoding="utf-8")
     assert str(account_id) in content
-    # Rollback/cleanup davranisi diger istisna turleriyle AYNI kalmalidir.
+    assert fake_port.validate_calls == [account_id]
+    # `_session_is_currently_invalid()`, ikinci `validate()` cagrisinin
+    # flush'ini KENDI oturumunda dogrudan commit eder (bkz. o fonksiyonun
+    # dokumani) - `orchestrator.run()`'un rollback'i buraya ARTIK erisemez.
     assert len(sessions) == 1
-    assert sessions[0].rollback_count == 1
+    assert sessions[0].commit_count == 1
+    assert sessions[0].rollback_count == 0
     assert sessions[0].closed is True
     assert engines[0].disposed is True
+
+
+def test_make_on_trigger_does_not_write_a_session_alert_when_failure_is_not_session_related(
+    monkeypatch, tmp_path
+):
+    # M11.3'un ozgullugu: Failed bir calistirma, oturum GECERLIYSE (orn.
+    # gecici bir ag hatasi retry'lari tuketti) alarm YAZMAMALIDIR - yalnizca
+    # HUMAN mudahalesi (yeniden giris) gerektiren durumlar icindir. Burada
+    # ikinci `validate()` cagrisi BASARILI olur (SessionInvalidError firlatmaz).
+    account_id = uuid4()
+    _, sessions = _patch_db(monkeypatch)
+    fake_port = _FakeLinkedInPort(validate_error=None)
+
+    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+        return _FakeDependencies(fake_port)
+
+    def _fake_run_account(*args, **kwargs):
+        return _run_log(
+            account_id=account_id,
+            status=RunStatus.FAILED,
+            error_detail="devre kesici tetiklendi",
+        )
+
+    monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
+    monkeypatch.setattr(main, "run_account", _fake_run_account)
+
+    on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
+    on_trigger(account_id)
+
+    assert not (tmp_path / "NEEDS_LOGIN.txt").exists()
+    assert fake_port.validate_calls == [account_id]
+    # Ikinci `validate()` basarili oldugu icin ek bir commit YOKTUR.
+    assert sessions[0].commit_count == 0
 
 
 def test_make_on_trigger_clears_a_previously_written_session_alert_on_success(
@@ -230,50 +311,59 @@ def test_make_on_trigger_clears_a_previously_written_session_alert_on_success(
     # bir SONRAKI basarili calistirmada temizlenir - boylece dosyanin
     # VARLIGI her zaman "su an cozulmemis" anlamina gelir.
     (tmp_path / "NEEDS_LOGIN.txt").write_text("eski uyari", encoding="utf-8")
+    account_id = uuid4()
     _patch_db(monkeypatch)
 
     def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
         return "deps"
 
+    def _fake_run_account(*args, **kwargs):
+        return _run_log(account_id=account_id, status=RunStatus.SUCCESS)
+
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
-    monkeypatch.setattr(main, "run_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main, "run_account", _fake_run_account)
 
     on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
 
-    on_trigger(uuid4())
+    on_trigger(account_id)
 
     assert not (tmp_path / "NEEDS_LOGIN.txt").exists()
 
 
-def test_make_on_trigger_session_invalid_error_still_propagates_when_alert_write_fails(
+def test_make_on_trigger_does_not_raise_when_alert_write_fails_after_a_failed_run(
     monkeypatch, tmp_path
 ):
-    # M11.3: `_write_session_alert()`'in kendi "best-effort, orijinal
-    # hatayi MASKELEMEZ" garantisini dogrudan dogrular - yazma HATASI
-    # (burada: `reports_dir`'in mevcut olmayan bir alt-dizini, `write_text`'in
-    # `FileNotFoundError`/`OSError` firlatmasina neden olur) SessionInvalidError'in
-    # yukari sizmasini ENGELLEMEMELIDIR.
-    engines, sessions = _patch_db(monkeypatch)
+    # M11.3: `_write_session_alert()`'in kendi "best-effort, cagiranin
+    # akisini MASKELEMEZ" garantisini dogrular - yazma HATASI (burada:
+    # `reports_dir`'in mevcut olmayan bir alt-dizini) `_on_trigger`'in
+    # KENDISININ beklenmedik bir sekilde FIRLATMASINA neden OLMAMALIDIR
+    # (M12 duzeltmesinden SONRA, Failed bir calistirma zaten normal
+    # DONER - firlatilacak orijinal bir istisna YOKTUR, bu yuzden burada
+    # dogrulanan sey NORMAL TAMAMLANMADIR, bir onceki istisna-maskeleme
+    # senaryosu DEGIL).
+    account_id = uuid4()
     unwritable_reports_dir = tmp_path / "does-not-exist"
+    engines, sessions = _patch_db(monkeypatch)
+    fake_port = _FakeLinkedInPort(validate_error=SessionInvalidError("oturum gecersiz"))
 
     def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
-        return "deps"
+        return _FakeDependencies(fake_port)
 
-    def _raise_session_invalid(*args, **kwargs):
-        raise SessionInvalidError("oturum gecersiz")
+    def _fake_run_account(*args, **kwargs):
+        return _run_log(
+            account_id=account_id, status=RunStatus.FAILED, error_detail="oturum gecersiz"
+        )
 
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
-    monkeypatch.setattr(main, "run_account", _raise_session_invalid)
+    monkeypatch.setattr(main, "run_account", _fake_run_account)
 
-    on_trigger = main._make_on_trigger(
-        Path("config"), unwritable_reports_dir, Path("secrets.json")
-    )
+    on_trigger = main._make_on_trigger(Path("config"), unwritable_reports_dir, Path("secrets.json"))
 
-    with pytest.raises(SessionInvalidError):
-        on_trigger(uuid4())
+    on_trigger(account_id)  # firlatmamali
 
     assert len(sessions) == 1
-    assert sessions[0].rollback_count == 1
+    assert sessions[0].commit_count == 1
+    assert sessions[0].rollback_count == 0
     assert sessions[0].closed is True
     assert engines[0].disposed is True
 
@@ -329,13 +419,12 @@ def test_run_forever_commits_after_initial_schedule_and_after_each_execution(mon
     )
     on_trigger_calls: list[tuple[UUID, TriggerType]] = []
     monkeypatch.setattr(main, "build_dependencies", lambda *args, **kwargs: "deps")
-    monkeypatch.setattr(
-        main,
-        "run_account",
-        lambda account_id, dependencies, now, lock_duration, trigger_type: on_trigger_calls.append(
-            (account_id, trigger_type)
-        ),
-    )
+
+    def _fake_run_account(account_id, dependencies, now, lock_duration, trigger_type):
+        on_trigger_calls.append((account_id, trigger_type))
+        return _run_log(account_id=account_id, status=RunStatus.SUCCESS)
+
+    monkeypatch.setattr(main, "run_account", _fake_run_account)
 
     account_id = uuid4()
 
