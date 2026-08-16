@@ -1,0 +1,64 @@
+{
+  "_comment": "M10.2 regresyon fixture'i: LinkedIn'in gercek (belgesiz) voyagerJobsDashJobCards yanitinin, gercek canli bir hesaba karsi dogrulanan YAPISAL sekliyle ANONIMLESTIRILMIS (gercek sirket/ilan adlari sahte degerlerle degistirilmis), kucultulmus (3 ilan) bir kopyasi. Ikinci ilanin LISTED_DATE footer ogesi BILEREK atlanir (tarihin bulunamama durumunu, sabit bir alan varsayimi yerine dogru sekilde ele aldigimizi kanitlamak icin).",
+  "data": {
+    "$type": "com.linkedin.restli.common.CollectionResponse",
+    "elements": [
+      {
+        "$type": "com.linkedin.voyager.dash.jobs.JobCard",
+        "jobCardUnion": {"*jobPostingCard": "urn:li:fsd_jobPostingCard:(1000000001,JOBS_SEARCH)"}
+      },
+      {
+        "$type": "com.linkedin.voyager.dash.jobs.JobCard",
+        "jobCardUnion": {"*jobPostingCard": "urn:li:fsd_jobPostingCard:(1000000002,JOBS_SEARCH)"}
+      },
+      {
+        "$type": "com.linkedin.voyager.dash.jobs.JobCard",
+        "jobCardUnion": {"*jobPostingCard": "urn:li:fsd_jobPostingCard:(1000000003,JOBS_SEARCH)"}
+      }
+    ],
+    "paging": {"total": 3, "start": 0, "count": 3}
+  },
+  "included": [
+    {
+      "$type": "com.linkedin.voyager.dash.jobs.JobPostingCard",
+      "entityUrn": "urn:li:fsd_jobPostingCard:(1000000001,JOBS_SEARCH)",
+      "jobPostingUrn": "urn:li:fsd_jobPosting:1000000001",
+      "jobPostingTitle": "Örnek Analist Pozisyonu",
+      "primaryDescription": {"$type": "com.linkedin.voyager.dash.common.text.TextViewModel", "text": "Örnek Holding A.Ş."},
+      "secondaryDescription": {"$type": "com.linkedin.voyager.dash.common.text.TextViewModel", "text": "İstanbul, Türkiye (İş yerinde)"},
+      "footerItems": [
+        {"$type": "com.linkedin.voyager.dash.jobs.JobPostingCardFooterItem", "type": "LISTED_DATE", "timeAt": 1785694003000},
+        {"$type": "com.linkedin.voyager.dash.jobs.JobPostingCardFooterItem", "type": "EASY_APPLY_TEXT"}
+      ]
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.jobs.JobPostingCard",
+      "entityUrn": "urn:li:fsd_jobPostingCard:(1000000001,JOB_DETAILS)",
+      "jobPostingUrn": "urn:li:fsd_jobPosting:1000000001",
+      "jobPostingTitle": "Örnek Analist Pozisyonu"
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.jobs.JobPostingCard",
+      "entityUrn": "urn:li:fsd_jobPostingCard:(1000000002,JOBS_SEARCH)",
+      "jobPostingUrn": "urn:li:fsd_jobPosting:1000000002",
+      "jobPostingTitle": "Dijital Pazarlama Uzmanı",
+      "primaryDescription": {"$type": "com.linkedin.voyager.dash.common.text.TextViewModel", "text": "Kuzeybatı Perakende Grubu"},
+      "secondaryDescription": {"$type": "com.linkedin.voyager.dash.common.text.TextViewModel", "text": "İstanbul, Türkiye (Hybrid)"},
+      "footerItems": [
+        {"$type": "com.linkedin.voyager.dash.jobs.JobPostingCardFooterItem", "type": "EASY_APPLY_TEXT"}
+      ]
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.jobs.JobPostingCard",
+      "entityUrn": "urn:li:fsd_jobPostingCard:(1000000003,JOBS_SEARCH)",
+      "jobPostingUrn": "urn:li:fsd_jobPosting:1000000003",
+      "jobPostingTitle": "Satış Yöneticisi",
+      "primaryDescription": {"$type": "com.linkedin.voyager.dash.common.text.TextViewModel", "text": "Örnek Ticaret A.Ş."},
+      "secondaryDescription": {"$type": "com.linkedin.voyager.dash.common.text.TextViewModel", "text": "Ümraniye, İstanbul, Türkiye (Hybrid)"},
+      "footerItems": [
+        {"$type": "com.linkedin.voyager.dash.jobs.JobPostingCardFooterItem", "type": "LISTED_DATE", "timeAt": 1786000000000}
+      ]
+    }
+  ],
+  "meta": {"microSchema": {}}
+}

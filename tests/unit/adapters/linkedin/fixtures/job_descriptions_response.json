@@ -1,0 +1,25 @@
+{
+  "_comment": "M10.2 regresyon fixture'i: LinkedIn'in gercek jobPostingDetailDescription GraphQL yanitinin ANONIMLESTIRILMIS, kucultulmus bir kopyasi - gercek yanitin TEK bir cagriyla sayfadaki BIRDEN FAZLA ilanin aciklamasini tasidigi (ampirik olarak dogrulandi) yapiyi yansitir. Ucuncu ilan (1000000003) BILEREK atlanir (o ilan icin aciklamanin bulunamama durumunu dogru ele aldigimizi kanitlamak icin).",
+  "data": {"$type": "com.linkedin.restli.common.CollectionResponse"},
+  "included": [
+    {
+      "$type": "com.linkedin.voyager.dash.jobs.JobDescription",
+      "entityUrn": "urn:li:fsd_jobDescription:1000000001",
+      "*jobPosting": "urn:li:fsd_jobPosting:1000000001",
+      "descriptionText": {
+        "$type": "com.linkedin.voyager.dash.common.text.TextViewModel",
+        "text": "Örnek Holding A.Ş. is looking for an experienced professional to join our growing team in Istanbul. In this role, you will collaborate cross-functionally to deliver measurable business impact while developing your own career."
+      }
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.jobs.JobDescription",
+      "entityUrn": "urn:li:fsd_jobDescription:1000000002",
+      "*jobPosting": "urn:li:fsd_jobPosting:1000000002",
+      "descriptionText": {
+        "$type": "com.linkedin.voyager.dash.common.text.TextViewModel",
+        "text": "Kuzeybatı Perakende Grubu seeks a Digital Marketing Specialist to plan and execute campaigns across paid and organic channels, working closely with the wider marketing team."
+      }
+    }
+  ],
+  "meta": {"microSchema": {}}
+}
