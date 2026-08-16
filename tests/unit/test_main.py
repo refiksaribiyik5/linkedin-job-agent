@@ -28,6 +28,7 @@ from linkedinbot import main
 from linkedinbot.domain.account import Account
 from linkedinbot.domain.run_log import TriggerType
 from linkedinbot.ports.account_repository_port import AccountRepositoryPort
+from linkedinbot.ports.linkedin_port import SessionInvalidError
 
 
 def _wait_until(predicate, timeout: float = 3.0, poll_interval: float = 0.01) -> bool:
@@ -167,7 +168,7 @@ def test_make_on_trigger_passes_the_scheduled_trigger_type_and_cleans_up(monkeyp
     assert engines[0].disposed is True
 
 
-def test_make_on_trigger_rolls_back_and_still_cleans_up_on_failure(monkeypatch):
+def test_make_on_trigger_rolls_back_and_still_cleans_up_on_failure(monkeypatch, tmp_path):
     engines, sessions = _patch_db(monkeypatch)
 
     def _raise(*args, **kwargs):
@@ -176,9 +177,99 @@ def test_make_on_trigger_rolls_back_and_still_cleans_up_on_failure(monkeypatch):
     monkeypatch.setattr(main, "build_dependencies", _raise)
     monkeypatch.setattr(main, "run_account", lambda *args, **kwargs: None)
 
-    on_trigger = main._make_on_trigger(Path("config"), Path("reports"), Path("secrets.json"))
+    on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
 
     with pytest.raises(RuntimeError, match="build_dependencies basarisiz oldu"):
+        on_trigger(uuid4())
+
+    assert len(sessions) == 1
+    assert sessions[0].rollback_count == 1
+    assert sessions[0].closed is True
+    assert engines[0].disposed is True
+    # M11.3: SessionInvalidError DISINDAKI bir hata icin uyari dosyasi
+    # YAZILMAMALIDIR - yalnizca SessionInvalidError'a ozeldir.
+    assert not (tmp_path / "NEEDS_LOGIN.txt").exists()
+
+
+def test_make_on_trigger_writes_a_session_alert_on_session_invalid_error(monkeypatch, tmp_path):
+    # Roadmap M11.3'un kendi "Tamamlanma Dogrulamasi": SessionInvalidError
+    # firlatan sahte bir tetikleyici ile, yan etkinin (uyari dosyasi)
+    # tam olarak bir kez tetiklendigi dogrulanir.
+    engines, sessions = _patch_db(monkeypatch)
+
+    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+        return "deps"
+
+    def _raise_session_invalid(*args, **kwargs):
+        raise SessionInvalidError("oturum gecersiz")
+
+    monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
+    monkeypatch.setattr(main, "run_account", _raise_session_invalid)
+
+    on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
+    account_id = uuid4()
+
+    with pytest.raises(SessionInvalidError):
+        on_trigger(account_id)
+
+    alert_path = tmp_path / "NEEDS_LOGIN.txt"
+    assert alert_path.exists()
+    content = alert_path.read_text(encoding="utf-8")
+    assert str(account_id) in content
+    # Rollback/cleanup davranisi diger istisna turleriyle AYNI kalmalidir.
+    assert len(sessions) == 1
+    assert sessions[0].rollback_count == 1
+    assert sessions[0].closed is True
+    assert engines[0].disposed is True
+
+
+def test_make_on_trigger_clears_a_previously_written_session_alert_on_success(
+    monkeypatch, tmp_path
+):
+    # M11.3: onceki bir basarisiz calistirmadan kalma bir uyari dosyasi,
+    # bir SONRAKI basarili calistirmada temizlenir - boylece dosyanin
+    # VARLIGI her zaman "su an cozulmemis" anlamina gelir.
+    (tmp_path / "NEEDS_LOGIN.txt").write_text("eski uyari", encoding="utf-8")
+    _patch_db(monkeypatch)
+
+    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+        return "deps"
+
+    monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
+    monkeypatch.setattr(main, "run_account", lambda *args, **kwargs: None)
+
+    on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
+
+    on_trigger(uuid4())
+
+    assert not (tmp_path / "NEEDS_LOGIN.txt").exists()
+
+
+def test_make_on_trigger_session_invalid_error_still_propagates_when_alert_write_fails(
+    monkeypatch, tmp_path
+):
+    # M11.3: `_write_session_alert()`'in kendi "best-effort, orijinal
+    # hatayi MASKELEMEZ" garantisini dogrudan dogrular - yazma HATASI
+    # (burada: `reports_dir`'in mevcut olmayan bir alt-dizini, `write_text`'in
+    # `FileNotFoundError`/`OSError` firlatmasina neden olur) SessionInvalidError'in
+    # yukari sizmasini ENGELLEMEMELIDIR.
+    engines, sessions = _patch_db(monkeypatch)
+    unwritable_reports_dir = tmp_path / "does-not-exist"
+
+    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+        return "deps"
+
+    def _raise_session_invalid(*args, **kwargs):
+        raise SessionInvalidError("oturum gecersiz")
+
+    monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
+    monkeypatch.setattr(main, "run_account", _raise_session_invalid)
+
+    on_trigger = main._make_on_trigger(
+        Path("config"), unwritable_reports_dir, Path("secrets.json")
+    )
+
+    with pytest.raises(SessionInvalidError):
         on_trigger(uuid4())
 
     assert len(sessions) == 1

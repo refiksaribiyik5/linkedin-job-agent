@@ -62,6 +62,7 @@ dokunmadan) dogrulanmasini saglar (bkz. tests/unit/test_main.py).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import threading
@@ -80,8 +81,19 @@ from linkedinbot.config.loader import load_account_context
 from linkedinbot.db.engine import create_db_engine, create_session_factory
 from linkedinbot.db.repositories.account_repository import SqlAlchemyAccountRepository
 from linkedinbot.domain.run_log import TriggerType
+from linkedinbot.ports.linkedin_port import SessionInvalidError
 
 ACCOUNT_ID_ENV_VAR = "ACCOUNT_ID"
+# M11.3 (Roadmap Faz 11, "Basarisizlik Gorunurlugu"): bildirim altyapisi
+# (kuyruk/webhook/e-posta) INSA ETMEDEN, zaten bind-mount edilmis
+# `reports/` dizinine (kullanicinin raporlari okumak icin ZATEN baktigi
+# TEK yer) acikca adlandirilmis bir isaret dosyasi yazilir. `main.py`
+# gercek dagitimda Docker/Linux konteyneri ICINDE calisir (bkz. Dockerfile
+# CMD) - macOS'a ozgu bir bildirim mekanizmasi (orn. `osascript`) buradan
+# DOGRUDAN tetiklenemez (konteynerde mevcut degildir, host'a da sizmaz);
+# bu yuzden mekanizma, HER IKI tarafta da (container/host) calisan, zaten
+# var olan bind-mount'a yazmaktir.
+_SESSION_ALERT_FILE_NAME = "NEEDS_LOGIN.txt"
 
 
 def _resolve_account_id(env: dict[str, str] | None = None) -> UUID:
@@ -104,6 +116,36 @@ def _load_schedule_settings(account_id: UUID, session: Session) -> tuple[timedel
     return timedelta(days=schedule.interval_days), timedelta(minutes=schedule.jitter_minutes)
 
 
+def _session_alert_path(reports_dir: Path) -> Path:
+    return reports_dir / _SESSION_ALERT_FILE_NAME
+
+
+def _write_session_alert(reports_dir: Path, account_id: UUID) -> None:
+    """M11.3: bir zamanlanmis calistirma `SessionInvalidError` ile
+    basarisiz oldugunda cagrilir. Yazma HATASI (izin, disk dolu vb.)
+    best-effort'tur ve SESSIZCE yutulur - orijinal `SessionInvalidError`'i
+    MASKELEMEZ (StructuredLogger'in kendi "best-effort sozlesmesi" ile
+    ayni ilke, bkz. logging/structured_logger.py modul dokumani)."""
+    with contextlib.suppress(OSError):
+        _session_alert_path(reports_dir).write_text(
+            "LinkedIn oturumu gecersiz - zamanlanmis calistirmalar bu "
+            f"hesap icin basarisiz oluyor (account_id: {account_id}).\n\n"
+            "Duzeltmek icin interaktif giris akisini (ensure_session, "
+            "Roadmap M3.1) HOST makinede yeniden calistirin.\n\n"
+            f"Son basarisiz deneme: {datetime.now(UTC).isoformat()}\n",
+            encoding="utf-8",
+        )
+
+
+def _clear_session_alert(reports_dir: Path) -> None:
+    """M11.3: bir SONRAKI basarili zamanlanmis calistirma cagirir - boylece
+    dosyanin VARLIGI her zaman "su an cozulmemis bir oturum sorunu var"
+    anlamina gelir, eski/artik gecersiz bir uyari olarak KALICI KALMAZ.
+    Dosya zaten yoksa (hic uyari yazilmamissa) sessizce hicbir sey yapmaz."""
+    with contextlib.suppress(OSError):
+        _session_alert_path(reports_dir).unlink(missing_ok=True)
+
+
 def _make_on_trigger(
     config_dir: Path, reports_dir: Path, secrets_file: Path
 ) -> Callable[[UUID], None]:
@@ -116,6 +158,12 @@ def _make_on_trigger(
     sinirini yonetir); hata yolunda rollback edip yeniden firlatir -
     `_fire()` bu hatayi zaten yutup loglayacagi icin (bkz. modul dokumani)
     bu yalnizca bu oturumun kendi temizligi icindir.
+
+    M11.3: `SessionInvalidError` ozel olarak yakalanir (genel `except
+    Exception` dalindan ONCE) - rollback/reraise davranisi TUM diger
+    istisna turleri icin DEGISMEDEN kalir, yalnizca BU turde ek olarak
+    `_write_session_alert()` cagrilir. Basarili bir calistirma, ONCEDEN
+    yazilmis olabilecek bir uyariyi `_clear_session_alert()` ile temizler.
     """
 
     def _on_trigger(account_id: UUID) -> None:
@@ -129,6 +177,11 @@ def _make_on_trigger(
             run_account(
                 account_id, dependencies, datetime.now(UTC), LOCK_DURATION, TriggerType.SCHEDULED
             )
+            _clear_session_alert(reports_dir)
+        except SessionInvalidError:
+            session.rollback()
+            _write_session_alert(reports_dir, account_id)
+            raise
         except Exception:
             session.rollback()
             raise
