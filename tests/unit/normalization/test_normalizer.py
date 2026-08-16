@@ -20,10 +20,12 @@ Proje talimatiyla acikca onaylanan kapsam kararlari:
    format kisitlamasi tasimaz; LinkedIn'in gercek sayisal ID'sini
    RecordExtractor (M3.4) su an cikarmiyor - URL, mevcut veriyle
    elde edilebilecek en dogal, benzersiz-per-ilan tanimlayicidir).
-4. posted_date, `collected_at` ile ayni deger olarak KASITLI bir
-   YER TUTUCUDUR (proje talimatiyla acikca onaylandi) - goreli tarih
-   metni ("3 gun once" vb.) ayristirmasi bu milestone'un kapsami disinda
-   birakilir (dogrulanamayan bicimler hakkinda tahmin yurutulmez).
+4. posted_date: M4.1'de `collected_at` ile ayni deger olan KASITLI bir
+   yer tutucuydu (o zaman tek mevcut sinyal goreli, ayristirilamayan bir
+   metindi). M11.2 (Roadmap Faz 11) bunu degistirir: `RawJobRecord.posted_date`
+   `YYYY-MM-DD` bicimindeyse (M10.2 sonrasi gercek LinkedIn sinyali)
+   GERCEK tarih kullanilir; ayristirilamazsa (orn. hala eski goreli
+   metin) `collected_at` yedegi DEGISMEDEN korunur - tahmin yurutulmez.
 5. `link` goreli bir URL ise (orn. "/jobs/view/12345"), `application_url`
    (Pydantic `HttpUrl`) olusturulmadan once LinkedIn'in kendi alan
    adi eklenir - bu, tahmin degil, iyi tanimlanmis bir URL normalizasyon
@@ -96,14 +98,27 @@ def test_normalize_record_sets_collected_at_from_caller():
     assert job_posting.collected_at == COLLECTED_AT
 
 
-def test_normalize_record_uses_collected_at_as_posted_date_placeholder():
-    # Proje talimatiyla acikca onaylanan yer tutucu karari (bkz. modul
-    # dokumaninin 4. maddesi) - goreli tarih metni ayristirilmaz.
+def test_normalize_record_falls_back_to_collected_at_when_posted_date_is_not_parseable():
+    # M11.2: goreli tarih metni ("3 days ago" gibi, hala eski/beklenmedik
+    # bir kaynaktan gelebilir) HALA ayristirilmaz - tahmin yurutulmez,
+    # `collected_at` yedegine dusulur (bkz. modul dokumaninin 4. maddesi).
     raw_record = _raw_record(posted_date="3 days ago")
 
     job_posting, _content_hash = normalize_record(raw_record, COLLECTED_AT)
 
     assert job_posting.posted_date == COLLECTED_AT
+
+
+def test_normalize_record_uses_real_listed_date_when_parseable():
+    # M11.2 (Roadmap Faz 11): M10.2 sonrasi `RawJobRecord.posted_date`
+    # LinkedIn'in kendi API'sinden gelen kesin bir `YYYY-MM-DD` dizesi
+    # tasiyabilir - bu artik `collected_at` ile GOLGELENMEMELI.
+    raw_record = _raw_record(posted_date="2026-08-02")
+
+    job_posting, _content_hash = normalize_record(raw_record, COLLECTED_AT)
+
+    assert job_posting.posted_date == datetime(2026, 8, 2, tzinfo=UTC)
+    assert job_posting.posted_date != COLLECTED_AT
 
 
 def test_normalize_record_leaves_optional_fields_unset():

@@ -33,15 +33,20 @@ KAPSAM KARARLARI (proje talimatiyla acikca onaylandi, M4.1 baslamadan once):
    elde edilebilecek en dogal, ilana-ozel benzersiz tanimlayici - dogrudan
    `job_id` olarak kullanilir.
 
-4. **posted_date**: `RawJobRecord.posted_date` ham, goreli bir GORUNTU
-   dizesidir (orn. "3 days ago") - `JobPosting.posted_date: datetime`
-   icin bunu guvenilir bicimde ayristirmak, dogrulanamayan (bu ortamda
-   canli bir LinkedIn hesabina erisim yoktur) bicim varsayimlari
-   gerektirirdi. Proje talimatiyla acikca onaylandi: `posted_date`,
-   `collected_at` ile AYNI deger olarak KASITLI bir yer tutucudur.
-   Bu, content_hash'i ETKILEMEZ - FR-14'un kendisi "goreli zaman
-   ifadelerini" content_hash'ten haric tutulmasi gereken tam da "oynak
-   alan" ornegi olarak sayar.
+4. **posted_date**: M4.1 zamaninda `RawJobRecord.posted_date` HER ZAMAN
+   goreli, ayristirilamayan bir GORUNTU dizesiydi (orn. "3 days ago") -
+   bu yuzden `collected_at` ile AYNI deger olarak KASITLI bir yer
+   tutucu kullanma karari O ZAMAN dogruydu (bkz. Roadmap'in M4.1'e
+   eklenmis ustunluk notu). M10.2'nin `playwright_client.py` yeniden
+   yazimi bu onkosulu GECERSIZ kildi: `RawJobRecord.posted_date` artik
+   (mevcut oldugunda) LinkedIn'in kendi API'sinden gelen kesin bir
+   `YYYY-MM-DD` dizesi tasir. M11.2 (Roadmap Faz 11) bunu kullanir:
+   `_parse_listed_date()` bu bicimi ayristirmayi dener; basarili olursa
+   GERCEK tarih kullanilir, BASARISIZ olursa (orn. hala eski goreli
+   bicimli bir deger, veya beklenmedik baska bir string) `collected_at`
+   yedek davranisi DEGISMEDEN korunur - tahmin YURUTULMEZ. Bu, content_hash'i
+   HALA ETKILEMEZ - FR-14 posted_date'i zaten "oynak alan" olarak haric
+   tutar, bu M11.2 ile DEGISMEDI.
 
 5. **application_url**: `RawJobRecord.link` goreli bir URL ise (orn.
    "/jobs/view/12345"), `JobPosting.application_url` (Pydantic `HttpUrl`)
@@ -56,7 +61,7 @@ KAPSAM KARARLARI (proje talimatiyla acikca onaylandi, M4.1 baslamadan once):
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import UTC, datetime
 from urllib.parse import urljoin
 
 from linkedinbot.collection.collector import RawJobRecord
@@ -66,6 +71,11 @@ _LINKEDIN_BASE_URL = "https://www.linkedin.com"
 _HASH_FIELD_SEPARATOR = "\x1f"  # ASCII "unit separator" - alan sinirlarinin
 # birlestirmede yanlislikla belirsizlesmesini (orn. "A"+"BC" ile "AB"+"C"
 # ayni dizeyi uretmesini) onler.
+# M11.2: `adapters/linkedin/playwright_client.py::_format_listed_date()`'in
+# UREttigi TAM bicim - bu modul (kasitli olarak `adapters.*`e bagimliligi
+# OLMADIGI icin) o fonksiyonu DOGRUDAN import ETMEZ, yalnizca ayni bicim
+# SOZLESMESINI (informal, testlerle korunan) paylasir.
+_LISTED_DATE_FORMAT = "%Y-%m-%d"
 
 
 def compute_content_hash(job_posting: JobPosting) -> str:
@@ -85,6 +95,20 @@ def compute_content_hash(job_posting: JobPosting) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _parse_listed_date(posted_date: str) -> datetime | None:
+    """M11.2: `raw_record.posted_date`'i `_LISTED_DATE_FORMAT` bicimine
+    karsi ayristirmayi dener. Basarili olursa UTC gece yarisinda bir
+    `datetime` doner; herhangi bir bicim uyumsuzlugunda (orn. hala eski
+    goreli metin, "3 days ago" gibi, veya beklenmedik baska bir deger)
+    `None` doner - tahmin YURUTULMEZ, cagiran `collected_at` yedegine
+    duser (bkz. modul dokumaninin 4. maddesi).
+    """
+    try:
+        return datetime.strptime(posted_date, _LISTED_DATE_FORMAT).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
 def normalize_record(raw_record: RawJobRecord, collected_at: datetime) -> tuple[JobPosting, str]:
     """RawJobRecord (M3.4) -> JobPosting (M1.1) + content_hash donusumu
     (Roadmap M4.1). Alan esleme kararlari icin modul dokumanina bakiniz.
@@ -99,6 +123,8 @@ def normalize_record(raw_record: RawJobRecord, collected_at: datetime) -> tuple[
     if not application_url.startswith(("http://", "https://")):
         application_url = urljoin(_LINKEDIN_BASE_URL, application_url)
 
+    posted_date = _parse_listed_date(raw_record.posted_date) or collected_at
+
     # Bagimsiz incelemede bulunan Kritik bulgu duzeltmesi: job_id, HER ZAMAN
     # normalize edilmis `application_url`'den turetilmelidir, ham
     # `raw_record.link`'ten DEGIL - aksi halde ayni gercek ilan, goreli mi
@@ -109,7 +135,7 @@ def normalize_record(raw_record: RawJobRecord, collected_at: datetime) -> tuple[
         title=raw_record.title,
         company_id=raw_record.company,
         location=raw_record.location,
-        posted_date=collected_at,
+        posted_date=posted_date,
         description=raw_record.description,
         application_url=application_url,
         collected_at=collected_at,
