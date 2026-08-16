@@ -7,8 +7,11 @@ TDD Section 9: "SessionManager - `linkedin_port`'un bir parcasi; Playwright'in
 yukler/dogrular." Bu sinif o tanimin ucu asamada teslim edilen kismini
 karsilar:
 
-- `ensure_session()` (M3.1): verilen hesap icin DB'de (`linkedin_sessions`)
-  kalici bir oturum referansi yoksa `playwright_client.perform_interactive_login`'i
+- `ensure_session()` (M3.1; M10.2 duzeltmesi: referans VARLIGI degil,
+  GECERLILIGI kontrol edilir - bkz. metodun kendi dokumani): verilen hesap
+  icin DB'de (`linkedin_sessions`) GECERLI kalici bir oturum yoksa (hic
+  referans yok, `session_status=EXPIRED` olarak bilinen, veya `validate()`
+  canli kontrolunde basarisiz olan) `playwright_client.perform_interactive_login`'i
   (constructor'dan enjekte edilen bir callable olarak) tetikler, sonucu
   Secrets Provider'a yazar ve DB satirini gunceller/olusturur.
 - `validate()` (M3.2, FR-1): kalici bir oturumun HALA gecerli olup
@@ -74,9 +77,53 @@ class SessionManager(LinkedInPort):
         self._search_page = search_page
 
     def ensure_session(self, account_id: UUID) -> None:
+        """M10.2 duzeltmesi (bagimsiz incelemede bulunan, gercek bir
+        calistirmada ampirik olarak dogrulanmis bir bulgu): bu metod ONCEDEN
+        yalnizca bir referansin VAR OLUP OLMADIGINI kontrol ediyordu -
+        referansin GECERLI olup olmadigini DEGIL. Sonuc: bir hesabin oturumu
+        LinkedIn tarafindan reddedilse bile, bu metod HICBIR ZAMAN yeniden
+        interaktif giris tetiklemiyordu - `encrypted_storage_state_ref`in
+        KENDISI hala mevcut oldugu icin erken donuyordu. Bu, manuel bir DB
+        satiri silme/temizleme olmadan KENDI KENDINE asla iyilesemeyen,
+        kalici bir kilitlenme durumuydu.
+
+        Yeni davranis UC durumu ayirt eder:
+        1. Hic kalici referans YOK -> interaktif giris (ONCEKI, degismemis
+           yol).
+        2. Referans VAR ve `session_status == EXPIRED` (`validate()`'in
+           DAHA ONCE isaretledigi, ucuz/onbellekli bir sinyal) -> GEREKSIZ
+           bir canli kontrol YAPMADAN dogrudan interaktif girise gecilir -
+           zaten bilinen kotu bir oturumu tekrar canli kontrol etmek
+           gereksiz bir ag cagrisidir.
+        3. Referans VAR ve `session_status` EXPIRED DEGIL (orn. `VALID`
+           veya hic dogrulanmamis) -> `validate()` (M3.2, AYNI
+           `_session_validity_checker` callable'ini kullanarak) cagrilarak
+           CANLI olarak kontrol edilir - bu, `session_status`in KENDISI
+           stale/yanlis olabilecegi (orn. LinkedIn oturumu son
+           dogrulamadan SONRA, DB HENUZ HABERDAR OLMADAN reddetmis olabilir
+           - bu duzeltmenin dogrudan kanitladigi GERCEK senaryo) durumlar
+           icin GEREKLIDIR. `validate()` basarili olursa (oturum HALA
+           gecerli) bu metod hicbir sey yapmadan doner - insan mudahalesi
+           GEREKMEZ. `validate()` `SessionInvalidError` firlatirsa,
+           interaktif girise gecilir (asagidaki AYNI DB/secret guncelleme
+           yolunu izleyerek).
+
+        Her iki "interaktif girise gec" durumunda da sonuc AYNIDIR: yeni bir
+        `storage_state` alinir ve KAYITLI referans/secret DEGISTIRILIR -
+        yeni bir referans ADI ICAT EDILMEZ (ayni deterministik
+        `linkedin_storage_state:{account_id}` anahtari yeni degerle UZERINE
+        YAZILIR) - manuel bir DB temizligine ASLA gerek YOKTUR.
+        """
         existing = self._session.get(LinkedInSessionOrm, account_id)
-        if existing is not None and existing.encrypted_storage_state_ref is not None:
-            return
+        has_reference = existing is not None and existing.encrypted_storage_state_ref is not None
+        known_expired = has_reference and existing.session_status == SessionStatus.EXPIRED
+
+        if has_reference and not known_expired:
+            try:
+                self.validate(account_id)
+                return
+            except SessionInvalidError:
+                pass
 
         storage_state = self._playwright_login()
         secret_key = f"linkedin_storage_state:{account_id}"

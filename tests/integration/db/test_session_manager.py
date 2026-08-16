@@ -122,12 +122,19 @@ def test_ensure_session_performs_login_when_no_existing_session(
     assert json.loads(persisted) == FAKE_STORAGE_STATE
 
 
-def test_ensure_session_skips_login_when_session_already_persisted(
+def test_ensure_session_skips_login_when_session_already_persisted_and_valid(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
+    secrets_provider: _FakeSecretsProvider,
     playwright_login,
+    session_validity_checker,
 ):
+    # M10.2 duzeltmesi: "zaten bir referans var" TEK BASINA yeterli DEGILDIR
+    # (bkz. ensure_session()'in kendi dokumani) - referansin GERCEKTEN
+    # cozulebilir VE canli olarak GECERLI olmasi gerekir. Bu yuzden burada
+    # (eski testin aksine) secrets_provider'a GERCEKTEN bir deger yazilir.
+    secrets_provider.set("linkedin_storage_state:already-there", json.dumps(FAKE_STORAGE_STATE))
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
@@ -137,12 +144,91 @@ def test_ensure_session_skips_login_when_session_already_persisted(
         )
     )
     db_session.flush()
+    session_validity_checker.state["return_value"] = True
 
     session_manager.ensure_session(account.account_id)
 
     # Roadmap M3.1'in tam olarak istedigi sey: kimlik bilgisi TEKRAR
-    # istenmez - interaktif giris callable'i hic cagirilmamali.
+    # istenmez - interaktif giris callable'i hic cagirilmamali. Ama (M10.2)
+    # bu, GERCEKTEN canli olarak dogrulanmis bir gecerlilige dayanmalidir -
+    # checker'in cagirildigi da acikca dogrulanir.
     assert playwright_login.calls == []
+    assert session_validity_checker.calls == [FAKE_STORAGE_STATE]
+
+
+def test_ensure_session_launches_login_when_session_marked_expired(
+    db_session: Session,
+    account: AccountOrm,
+    session_manager: SessionManager,
+    secrets_provider: _FakeSecretsProvider,
+    playwright_login,
+    session_validity_checker,
+):
+    # M10.2 duzeltmesi - EN ONEMLI senaryo: bu ONCEDEN sonsuza kadar
+    # kilitlenen tam durumdu (bkz. ensure_session()'in kendi dokumani).
+    # `session_status=EXPIRED` ONCEDEN bilindigi icin `validate()`'in
+    # canli kontrolu HIC CAGRILMAZ (gereksiz bir ag istegi) - dogrudan
+    # interaktif girise gecilir.
+    secrets_provider.set("linkedin_storage_state:stale", json.dumps(FAKE_STORAGE_STATE))
+    db_session.add(
+        LinkedInSessionOrm(
+            account_id=account.account_id,
+            encrypted_storage_state_ref="linkedin_storage_state:stale",
+            session_status=SessionStatus.EXPIRED,
+            last_validated_at=datetime.now(UTC),
+        )
+    )
+    db_session.flush()
+
+    session_manager.ensure_session(account.account_id)
+
+    assert len(playwright_login.calls) == 1
+    # Zaten EXPIRED oldugu BILINEN bir oturum icin gereksiz bir canli
+    # kontrol YAPILMAMALIDIR - verimlilik icin kasitli bir kisayol.
+    assert session_validity_checker.calls == []
+    row = db_session.get(LinkedInSessionOrm, account.account_id)
+    assert row.session_status == SessionStatus.VALID
+    assert json.loads(secrets_provider.get(row.encrypted_storage_state_ref)) == FAKE_STORAGE_STATE
+
+
+def test_ensure_session_launches_login_and_replaces_session_when_validation_fails(
+    db_session: Session,
+    account: AccountOrm,
+    session_manager: SessionManager,
+    secrets_provider: _FakeSecretsProvider,
+    playwright_login,
+    session_validity_checker,
+):
+    # M10.2 duzeltmesi - `session_status` DB'de HALA `VALID` yaziyor olsa
+    # bile (orn. LinkedIn oturumu son dogrulamadan SONRA, DB HENUZ
+    # HABERDAR OLMADAN reddetmis olabilir - bu duzeltmenin dogrudan
+    # kanitladigi GERCEK senaryo), `validate()`'in canli kontrolu bunu
+    # YAKALAR ve interaktif girise gecer.
+    old_ref = "linkedin_storage_state:old-and-rejected"
+    secrets_provider.set(old_ref, json.dumps({"cookies": [{"name": "li_at", "value": "stale"}]}))
+    db_session.add(
+        LinkedInSessionOrm(
+            account_id=account.account_id,
+            encrypted_storage_state_ref=old_ref,
+            session_status=SessionStatus.VALID,
+            last_validated_at=datetime.now(UTC),
+        )
+    )
+    db_session.flush()
+    session_validity_checker.state["return_value"] = False
+
+    session_manager.ensure_session(account.account_id)
+
+    assert len(playwright_login.calls) == 1
+    # Canli kontrol GERCEKTEN denendi (kisayol degil, M10.2'nin asil
+    # kanitladigi senaryo).
+    assert session_validity_checker.calls == [{"cookies": [{"name": "li_at", "value": "stale"}]}]
+    row = db_session.get(LinkedInSessionOrm, account.account_id)
+    assert row.session_status == SessionStatus.VALID
+    assert row.encrypted_storage_state_ref is not None
+    # Eski referans DEGIL, YENI girisin urettigi storage_state saklanmis
+    # olmalidir - "degistirilir" gereksiniminin somut kaniti.
+    assert json.loads(secrets_provider.get(row.encrypted_storage_state_ref)) == FAKE_STORAGE_STATE
 
 
 def test_ensure_session_updates_placeholder_row_missing_a_session_ref(
