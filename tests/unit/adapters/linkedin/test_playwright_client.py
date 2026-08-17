@@ -36,6 +36,16 @@ from linkedinbot.adapters.linkedin.playwright_client import (
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+class _FakeGotoResponse:
+    """Gercek Playwright `Page.goto()`'nun dondurdugu `Response` nesnesinin
+    minimal bir sahtesi - yalnizca `check_session_is_valid()`'in okudugu
+    `.status` alanini tasir (M12'nin canli dogrulamasi sirasinda eklenen
+    teshis loglamasi icin)."""
+
+    def __init__(self, status: int | None):
+        self.status = status
+
+
 class _FakePage:
     """M10.2 mimari evrimi: `fetch_search_results_page()` artik DOM
     sorgulamaz - Playwright'in KENDI ag yaniti olaylarini (`page.on(
@@ -55,6 +65,7 @@ class _FakePage:
         raise_on_goto: Exception | None = None,
         response_events: list[tuple[str, str]] | None = None,
         response_event_delay_polls: int = 0,
+        goto_status: int | None = 200,
     ):
         self.goto_calls: list[str] = []
         self.wait_for_url_calls: list[tuple[str, int]] = []
@@ -66,9 +77,10 @@ class _FakePage:
         self._response_event_delay_polls = response_event_delay_polls
         self._response_handler = None
         self._poll_count = 0
+        self._goto_status = goto_status
         self.url = ""
 
-    def goto(self, url: str) -> None:
+    def goto(self, url: str) -> _FakeGotoResponse:
         self.goto_calls.append(url)
         # Gercek Playwright'te ag yanitlari `goto()`'nun kendi "load"
         # beklemesiyle ES ZAMANLI/ONCE gelebilir (canli olarak dogrulandi -
@@ -81,6 +93,7 @@ class _FakePage:
         if self._raise_on_goto is not None:
             raise self._raise_on_goto
         self.url = self._landing_url if self._landing_url is not None else url
+        return _FakeGotoResponse(self._goto_status)
 
     def wait_for_url(self, pattern: str, timeout: int) -> None:
         self.wait_for_url_calls.append((pattern, timeout))
@@ -162,6 +175,7 @@ def _install_fake_playwright(
     raise_on_goto: Exception | None = None,
     response_events: list[tuple[str, str]] | None = None,
     response_event_delay_polls: int = 0,
+    goto_status: int | None = 200,
 ):
     page = _FakePage(
         raise_on_wait=raise_on_wait,
@@ -169,6 +183,7 @@ def _install_fake_playwright(
         raise_on_goto=raise_on_goto,
         response_events=response_events,
         response_event_delay_polls=response_event_delay_polls,
+        goto_status=goto_status,
     )
     context = _FakeContext(page)
     browser = _FakeBrowser(context)
@@ -359,6 +374,73 @@ def test_check_session_is_valid_does_not_reclassify_navigation_errors(monkeypatc
 
     with pytest.raises(RuntimeError, match="simulated network failure"):
         check_session_is_valid(FAKE_STORED_STATE)
+
+
+def test_check_session_is_valid_logs_no_warning_when_session_is_valid(monkeypatch, caplog):
+    # M12'nin canli dogrulamasi sirasinda bulunan bir gozlemlenebilirlik
+    # boslugunun kapatilmasi: teshis loglamasi YALNIZCA basarisiz (gecersiz)
+    # durumda tetiklenmeli - basarili yolun davranisi/log ciktisi degismemeli.
+    _install_fake_playwright(monkeypatch, landing_url=SESSION_CHECK_URL)
+
+    with caplog.at_level("WARNING", logger=module_under_test.__name__):
+        result = check_session_is_valid(FAKE_STORED_STATE)
+
+    assert result is True
+    assert caplog.records == []
+
+
+def test_check_session_is_valid_logs_sanitized_redirect_url_and_status_on_failure(
+    monkeypatch, caplog
+):
+    _install_fake_playwright(
+        monkeypatch,
+        landing_url="https://www.linkedin.com/checkpoint/challenge?token=super-secret-value",
+        goto_status=302,
+    )
+
+    with caplog.at_level("WARNING", logger=module_under_test.__name__):
+        result = check_session_is_valid(FAKE_STORED_STATE)
+
+    assert result is False
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    # Yol (teshis icin gerekli bilgi) loglanir...
+    assert "https://www.linkedin.com/checkpoint/challenge" in message
+    assert "302" in message
+    assert "session_valid=False" in message
+    # ...ama sorgu dizesi (hassas token TASIYABILECEGI icin) ASLA loglanmaz.
+    assert "token" not in message
+    assert "super-secret-value" not in message
+
+
+def test_check_session_is_valid_never_logs_the_storage_state_value_on_failure(monkeypatch, caplog):
+    # Cerez/storage_state DEGERLERI (ornegin gercek oturum token'i) hicbir
+    # kosulda loglanmamalidir - yalnizca gidilen sayfanin (sanitize edilmis)
+    # yolu ve HTTP durumu loglanir.
+    _install_fake_playwright(
+        monkeypatch, landing_url="https://www.linkedin.com/login", goto_status=200
+    )
+
+    with caplog.at_level("WARNING", logger=module_under_test.__name__):
+        check_session_is_valid(FAKE_STORED_STATE)
+
+    assert "previously-stored-session" not in caplog.text
+
+
+def test_check_session_is_valid_logs_null_status_when_goto_returns_none(monkeypatch, caplog):
+    # `page.goto()`'nun dondurdugu yanitin `.status`'u bilinmiyorsa (orn.
+    # `None`), teshis loglamasi bunu bir hataya (AttributeError/format hatasi)
+    # DONUSTURMEDEN, sadece "durum bilinmiyor" olarak loglamalidir.
+    _install_fake_playwright(
+        monkeypatch, landing_url="https://www.linkedin.com/login", goto_status=None
+    )
+
+    with caplog.at_level("WARNING", logger=module_under_test.__name__):
+        result = check_session_is_valid(FAKE_STORED_STATE)
+
+    assert result is False
+    assert len(caplog.records) == 1
+    assert "None" in caplog.records[0].getMessage()
 
 
 # ---------------------------------------------------------------------------

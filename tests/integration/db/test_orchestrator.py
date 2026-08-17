@@ -29,6 +29,7 @@ istekte kapanma) kurgulanir.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -36,8 +37,15 @@ import pytest
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
+from linkedinbot.adapters.linkedin.session_manager import SessionManager
 from linkedinbot.adapters.reporting.filesystem_report_store import FilesystemReportStore
-from linkedinbot.db.models import AccountConfigProfileOrm, RunLogOrm, UserProfileOrm
+from linkedinbot.db.models import (
+    AccountConfigProfileOrm,
+    LinkedInSessionOrm,
+    RunLogOrm,
+    SessionStatus,
+    UserProfileOrm,
+)
 from linkedinbot.db.repositories.company_repository import SqlAlchemyCompanyRepository
 from linkedinbot.db.repositories.company_score_repository import SqlAlchemyCompanyScoreRepository
 from linkedinbot.db.repositories.evaluated_job_repository import SqlAlchemyEvaluatedJobRepository
@@ -48,6 +56,7 @@ from linkedinbot.domain.evaluated_job import FilterResult, JobStatus, MatchRatio
 from linkedinbot.domain.run_log import RunStatus, TriggerType
 from linkedinbot.ports.linkedin_port import LinkedInPort, SessionInvalidError
 from linkedinbot.ports.report_store_port import ReportStorePort
+from linkedinbot.ports.secrets_provider_port import SecretsProviderPort
 from linkedinbot.run import orchestrator
 from linkedinbot.run.run_lock import RunLock
 from linkedinbot.scoring.ai_matching import AIMatchRationaleInference, CareerGoalAlignmentInference
@@ -619,6 +628,67 @@ def test_session_invalid_error_leaves_no_state_and_writes_a_failed_run_log(
     run_log_row = dependencies.run_log_repository.get_by_id(account.account_id, result.run_id)
     assert run_log_row is not None
     assert run_log_row.status == RunStatus.FAILED
+
+
+class _FakeSecretsProvider(SecretsProviderPort):
+    """`tests/integration/db/test_session_manager.py`'deki ayni desenin
+    kopyasi - burada AYRI tutulur cunku o dosyadaki sinif bir test-yardimci
+    modulu olarak paylasilacak sekilde disa aktarilmiyor."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self._store[key] = value
+
+
+def test_session_invalid_error_persists_expired_status_despite_rollback(
+    db_session: Session, account, tmp_path
+):
+    """Regresyon testi: M12'nin canli dogrulamasi sirasinda bulunan gercek
+    bir kusur. `SessionManager.validate()` (GERCEK implementasyon, sahte
+    DEGIL) gecersiz bir oturumu `EXPIRED` olarak isaretleyip `flush()`
+    eder, sonra `SessionInvalidError` firlatir. Bu test, `orchestrator.run()`
+    duzeltmesinden ONCE, `except Exception` blogunun genel `rollback()`'i
+    bu flush'i commit'ten once sessizce siliyordu - DB, gercekte gecersiz
+    olan bir oturumu sonsuza kadar "valid" gosteriyordu (bkz. orchestrator.py
+    `run()` "except Exception" blogunun kendi yorumu)."""
+    _seed_account_context(db_session, account.account_id)
+    secret_key = f"linkedin_storage_state:{account.account_id}"
+    db_session.add(
+        LinkedInSessionOrm(
+            account_id=account.account_id,
+            encrypted_storage_state_ref=secret_key,
+            session_status=SessionStatus.VALID,
+            last_validated_at=NOW,
+        )
+    )
+    db_session.flush()
+
+    secrets_provider = _FakeSecretsProvider()
+    secrets_provider.set(secret_key, json.dumps({"cookies": []}))
+    session_manager = SessionManager(
+        db_session,
+        secrets_provider,
+        lambda: {},  # playwright_login - bu senaryoda hic cagrilmamali
+        lambda _storage_state: False,  # session_validity_checker - gecersiz oturumu simule eder
+        lambda *_args: [],  # search_page - Session Validation'da durulacagi icin hic cagrilmamali
+    )
+    dependencies = _make_dependencies(db_session, tmp_path, session_manager, _ScriptedLLMGateway())
+
+    result = orchestrator.run(
+        account.account_id, dependencies, TriggerType.MANUAL, NOW, LOCK_DURATION, is_bootstrap=True
+    )
+
+    assert result.status == RunStatus.FAILED
+    assert dependencies.evaluated_job_repository.list_by_account(account.account_id) == []
+
+    session_row = db_session.get(LinkedInSessionOrm, account.account_id)
+    assert session_row is not None
+    assert session_row.session_status == SessionStatus.EXPIRED
 
 
 def test_mid_pipeline_failure_rolls_back_the_batch_but_keeps_eager_writes_and_logs_failure(

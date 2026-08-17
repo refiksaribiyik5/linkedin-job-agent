@@ -316,7 +316,21 @@ def collect_raw_job_cards(
                         retry_max_delay_ms=retry_max_delay_ms,
                         sleep=sleep,
                     )
-                except TransientError:
+                except TransientError as exc:
+                    # Teshis loglamasi (M12'nin canli dogrulamasi sirasinda bulunan bir
+                    # gozlemlenebilirlik boslugunun kapatilmasi, check_session_is_valid()'e
+                    # eklenenle AYNI desen): hangi sorgunun (location/keywords/page) hangi
+                    # gercek hatayla basarisiz oldugu, devre kesici sayacinin KENDISI
+                    # oncesinde kaydedilir - hicbir cerez/storage_state/kimlik bilgisi
+                    # degeri LOGLANMAZ, yalnizca sorgu parametreleri ve hata mesaji.
+                    logger.warning(
+                        "LinkedIn sorgusu basarisiz (retry tukendi): location=%r, "
+                        "keywords=%r, page=%d, hata=%s",
+                        location,
+                        keywords,
+                        page,
+                        exc,
+                    )
                     any_query_failed = True
                     consecutive_failures += 1
                     if consecutive_failures >= linkedin_consecutive_failure_threshold:

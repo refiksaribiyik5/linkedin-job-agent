@@ -141,6 +141,7 @@ from linkedinbot.domain.run_log import RunLog, RunStatus, TriggerType
 from linkedinbot.filtering.pipeline import PipelineResult, run_filtering_pipeline
 from linkedinbot.history.diff_engine import PreviousEvaluation, diff_job_postings
 from linkedinbot.normalization.normalizer import normalize_record
+from linkedinbot.ports.linkedin_port import SessionInvalidError
 from linkedinbot.ranking.ranker import group_by_department, rank_top_matches
 from linkedinbot.reporting.compiler import compile_report
 from linkedinbot.run.run_lock import RunLock
@@ -839,7 +840,20 @@ def run(
     except RunAlreadyInProgressError:
         raise
     except Exception as exc:  # noqa: BLE001 - TDD Section 20: merkezi hata siniflandirma noktasi
-        dependencies.session.rollback()
+        # `SessionInvalidError` icin rollback ETMEYIZ (diger hata turlerinin
+        # aksine): `SessionManager.validate()` (Session Validation, pipeline'in
+        # ILK adimi) gecersiz bir oturumu `EXPIRED` olarak isaretleyip
+        # `flush()` eder, SONRA bu istisnayi firlatir (bkz. session_manager.py
+        # `validate()`). Genel bir rollback bu flush'i commit'ten once
+        # SESSIZCE siler ve DB'yi, gercekte gecersiz olan bir oturumu
+        # sonsuza kadar "valid" gosterir halde birakirdi (M12'nin canli
+        # dogrulamasinda bulunan gercek bir kusur). `validate()` pipeline'in
+        # ILK adimi oldugu icin, bu noktada commit edilecek TEK pending
+        # degisiklik bu `EXPIRED` isaretidir.
+        if isinstance(exc, SessionInvalidError):
+            dependencies.session.commit()
+        else:
+            dependencies.session.rollback()
         try:
             failed_run_log = dependencies.run_log_repository.create(
                 RunLog(

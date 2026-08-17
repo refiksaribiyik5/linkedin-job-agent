@@ -125,13 +125,16 @@ from __future__ import annotations
 import contextlib
 import html as html_module
 import json
+import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://www.linkedin.com/login"
 SESSION_CHECK_URL = "https://www.linkedin.com/feed/"
@@ -175,6 +178,7 @@ _LISTED_DATE_FOOTER_ITEM_TYPE = "LISTED_DATE"
 _JOB_CARDS_RESPONSE_TIMEOUT_MS = 20 * 1000
 _JOB_DESCRIPTIONS_RESPONSE_TIMEOUT_MS = 20 * 1000
 _RESPONSE_POLL_INTERVAL_MS = 250
+
 
 class LoginTimeoutError(RuntimeError):
     """Kullanici, `_LOGIN_TIMEOUT_MS` icinde interaktif girisi
@@ -223,6 +227,16 @@ def perform_interactive_login() -> dict[str, Any]:
             browser.close()
 
 
+def _sanitized_url(url: str) -> str:
+    """Bir URL'nin yalnizca scheme/host/path kismini dondurur - sorgu
+    dizesi ve fragment (hassas token/parametre tasiyabilecekleri icin)
+    ATILIR. Teshis loglamasi (bkz. `check_session_is_valid()`) icin
+    kullanilir - cerez/storage_state DEGERLERI bu fonksiyona hicbir zaman
+    verilmez, yalnizca bir sayfa URL'si verilir."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
 def check_session_is_valid(storage_state: dict[str, Any]) -> bool:
     """Verilen `storage_state`'i (cerezler + local storage) yeni, gorunmez
     (`headless=True`) bir tarayici baglaminda yukleyip, kimlik dogrulama
@@ -235,6 +249,15 @@ def check_session_is_valid(storage_state: dict[str, Any]) -> bool:
     sayfada olup olmadigina bakmak yeterlidir; M3.1'deki gibi bir insanin
     tamamlamasini "beklemek" (wait_for_url/timeout) burada anlamsizdir.
 
+    Teshis loglamasi (M11.3'un "fail loudly" ilkesiyle tutarli, operasyonel
+    deger tasir - bkz. Roadmap M12'nin canli dogrulamasi): gecersiz
+    donuldugunde, LinkedIn'in GERCEKTE nereye yonlendirdigi
+    (`_sanitized_url(page.url)` - sorgu dizesi/fragment ATILMIS) ve
+    mumkunse navigasyonun HTTP durum kodu `logger.warning` ile kaydedilir -
+    hicbir cerez/storage_state/kimlik bilgisi degeri LOGLANMAZ, yalnizca
+    gidilen sayfanin yolu. Basarili (gecerli) durumda hicbir ek log
+    YOKTUR - bu fonksiyonun donus degeri/davranisi degismez.
+
     Tarayici, basarili/basarisiz her durumda kapatilir (try/finally).
     """
     with sync_playwright() as playwright:
@@ -242,8 +265,17 @@ def check_session_is_valid(storage_state: dict[str, Any]) -> bool:
         try:
             context = browser.new_context(storage_state=storage_state)
             page = context.new_page()
-            page.goto(SESSION_CHECK_URL)
-            return SESSION_CHECK_URL in page.url
+            response = page.goto(SESSION_CHECK_URL)
+            is_valid = SESSION_CHECK_URL in page.url
+            if not is_valid:
+                logger.warning(
+                    "Oturum gecerlilik kontrolu basarisiz (session_valid=False): "
+                    "LinkedIn beklenen sayfa yerine baska bir yere yonlendirdi "
+                    "(redirected_to=%r, http_status=%s).",
+                    _sanitized_url(page.url),
+                    response.status if response is not None else None,
+                )
+            return is_valid
         finally:
             browser.close()
 

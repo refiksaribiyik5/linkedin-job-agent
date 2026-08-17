@@ -530,6 +530,54 @@ def test_collect_raw_job_cards_trips_circuit_breaker_and_returns_partial():
     assert ("Istanbul", '"Consulting"') not in queries_attempted
 
 
+def test_collect_raw_job_cards_logs_the_real_error_for_each_consecutive_failure(caplog):
+    # M12'nin canli dogrulamasi sirasinda bulunan bir gozlemlenebilirlik
+    # boslugunun kapatilmasi: devre kesici tetiklendiginde, HER ardisik
+    # basarisizlik icin gercek hata mesaji + hangi sorgu (location/keywords/
+    # page) oldugu artik loglanmali - onceden yalnizca toplu `partial_reason`
+    # metni vardi, hangi sorgunun/hatanin bu duruma yol actigi kayipti.
+    target_criteria = _target_criteria(
+        departments={
+            "Sales & Business Development": ["Sales"],
+            "Marketing": ["Marketing"],
+        }
+    )
+    port = _FakeLinkedInPort(
+        always_fail_queries=frozenset(
+            {
+                ("Istanbul", '"Sales"'),
+                ("Istanbul", '"Marketing"'),
+            }
+        ),
+    )
+    sleep = _recording_sleep()
+
+    with caplog.at_level("WARNING", logger=module_under_test.__name__):
+        result = collect_raw_job_cards(
+            port,
+            ACCOUNT_ID,
+            target_criteria,
+            max_jobs_per_run=200,
+            delay_seconds=0.0,
+            jitter_seconds=0.0,
+            linkedin_retry_attempts=1,
+            retry_base_delay_ms=0,
+            retry_max_delay_ms=0,
+            linkedin_consecutive_failure_threshold=2,
+            sleep=sleep,
+        )
+
+    assert result.is_complete is False
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2
+    assert "Istanbul" in messages[0]
+    assert '"Sales"' in messages[0]
+    assert "simulated persistent LinkedIn failure" in messages[0]
+    assert "Istanbul" in messages[1]
+    assert '"Marketing"' in messages[1]
+    assert "simulated persistent LinkedIn failure" in messages[1]
+
+
 def test_collect_raw_job_cards_a_successful_request_resets_the_consecutive_failure_counter():
     # Devre kesici SADECE ARDISIK basarisizliklari sayar - Sales basarisiz
     # olur (1. ardisik), Marketing basarili olur (sayac SIFIRLANIR),
