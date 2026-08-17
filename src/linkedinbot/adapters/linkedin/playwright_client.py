@@ -128,6 +128,7 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urlsplit, urlunsplit
 
@@ -198,19 +199,40 @@ class JobCardsResponseTimeoutError(RuntimeError):
     zaten bu sekilde ele alir) dogrudan akar."""
 
 
-def perform_interactive_login() -> dict[str, Any]:
+def perform_interactive_login(user_data_dir: Path) -> None:
     """Gorunur bir tarayici acar, kullanicinin interaktif olarak giris
-    yapmasini bekler, basarili giris sonrasi Playwright `storage_state`'i
-    (cerezler + local storage) dondurur.
+    yapmasini bekler; basarili giris sonrasi hicbir sey DONDURMEZ -
+    `launch_persistent_context(user_data_dir=...)` zaten cerezleri/local
+    storage'i (ve Chromium'un kendi tam profilini) SUREKLI olarak
+    `user_data_dir`'e yazar, bu yuzden ayrica bir "sonucu al" adimina
+    gerek yoktur (bkz. modulun kendi "Mimari degisiklik" notu).
+
+    Mimari degisiklik (storage_state snapshot -> persistent Chromium
+    profili): ONCEKI tasarim (`browser.new_context()` + `context.
+    storage_state()`) giris tarayicisini TAMAMEN yok edip cerezleri bir
+    JSON anlik goruntusu olarak disariya tasiyordu; bu anlik goruntu
+    DAHA SONRA, BASKA bir sure/ortamda (orn. Docker) SIFIRDAN bos bir
+    context'e enjekte ediliyordu - M12'nin canli dogrulamasinda kanitlandi
+    ki bu "soguk yeniden oynatma" (cold replay) deseni LinkedIn tarafindan
+    guvenilmez bulunuyor (bkz. Roadmap M12/M13 kok neden analizi). Yeni
+    tasarim, giris VE dogrulama/toplama icin HER ZAMAN AYNI, kalici
+    Chromium profilini (`user_data_dir`, hesap-bazli - bkz.
+    session_manager.py) acar/kapatir - hicbir "anlik goruntu cikar,
+    baska yerde yeniden olustur" adimi hic yasanmaz.
+
+    `user_data_dir` (henuz yoksa) burada olusturulur, 0700 izniyle
+    (authentication state tasiyacagi icin - secrets/ dizini icin TDD
+    Section 24'un ZATEN uyguladigi ayni disiplin).
 
     Tarayici, basarili/basarisiz her durumda kapatilir (try/finally) -
     aksi halde bir zaman asimi/hata, arka planda asili kalan bir tarayici
     surecine (kaynak sizintisi) neden olabilirdi.
     """
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    user_data_dir.chmod(0o700)
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False)
+        context = playwright.chromium.launch_persistent_context(str(user_data_dir), headless=False)
         try:
-            context = browser.new_context()
             page = context.new_page()
             page.goto(LOGIN_URL)
             try:
@@ -222,9 +244,8 @@ def perform_interactive_login() -> dict[str, Any]:
                     "sayfasina ulasilamadi (giris tamamlanmadi mi, 2FA/CAPTCHA "
                     "yarim mi kaldi?)."
                 ) from exc
-            return context.storage_state()
         finally:
-            browser.close()
+            context.close()
 
 
 def _sanitized_url(url: str) -> str:
@@ -237,11 +258,19 @@ def _sanitized_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
-def check_session_is_valid(storage_state: dict[str, Any]) -> bool:
-    """Verilen `storage_state`'i (cerezler + local storage) yeni, gorunmez
-    (`headless=True`) bir tarayici baglaminda yukleyip, kimlik dogrulama
+def check_session_is_valid(user_data_dir: Path) -> bool:
+    """Verilen kalici Chromium profilini (`user_data_dir` - hesap-bazli,
+    bkz. session_manager.py) yeni, gorunmez (`headless=True`) bir
+    `launch_persistent_context()` baglaminda acip, kimlik dogrulama
     gerektiren bir LinkedIn sayfasina (`SESSION_CHECK_URL`) gidilerek
     oturumun HALA gecerli olup olmadigini kontrol eder.
+
+    ONCEKI tasarimdan (`browser.new_context(storage_state=...)`, bir JSON
+    anlik goruntusunu HER cagrida SIFIRDAN bos bir context'e enjekte
+    ediyordu) farki: burada AYNI, kalici profil HER cagrida ayni
+    `user_data_dir`'den acilir - "soguk yeniden oynatma" (cold replay)
+    deseni yoktur (bkz. `perform_interactive_login()`'in kendi "Mimari
+    degisiklik" notu).
 
     Gecersiz/suresi dolmus bir oturum, LinkedIn'i sunucu tarafinda
     dogrudan giris sayfasina yonlendirmeye zorlar - bu yuzden `goto()`
@@ -254,16 +283,15 @@ def check_session_is_valid(storage_state: dict[str, Any]) -> bool:
     donuldugunde, LinkedIn'in GERCEKTE nereye yonlendirdigi
     (`_sanitized_url(page.url)` - sorgu dizesi/fragment ATILMIS) ve
     mumkunse navigasyonun HTTP durum kodu `logger.warning` ile kaydedilir -
-    hicbir cerez/storage_state/kimlik bilgisi degeri LOGLANMAZ, yalnizca
-    gidilen sayfanin yolu. Basarili (gecerli) durumda hicbir ek log
-    YOKTUR - bu fonksiyonun donus degeri/davranisi degismez.
+    hicbir cerez/profil/kimlik bilgisi degeri LOGLANMAZ, yalnizca gidilen
+    sayfanin yolu. Basarili (gecerli) durumda hicbir ek log YOKTUR - bu
+    fonksiyonun donus degeri/davranisi degismez.
 
     Tarayici, basarili/basarisiz her durumda kapatilir (try/finally).
     """
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        context = playwright.chromium.launch_persistent_context(str(user_data_dir), headless=True)
         try:
-            context = browser.new_context(storage_state=storage_state)
             page = context.new_page()
             response = page.goto(SESSION_CHECK_URL)
             is_valid = SESSION_CHECK_URL in page.url
@@ -277,7 +305,7 @@ def check_session_is_valid(storage_state: dict[str, Any]) -> bool:
                 )
             return is_valid
         finally:
-            browser.close()
+            context.close()
 
 
 def _job_id_from_jobposting_urn(urn: str) -> str:
@@ -429,16 +457,20 @@ def _wait_until(page_obj: Any, predicate: Any, timeout_ms: float) -> bool:
 
 
 def fetch_search_results_page(
-    storage_state: dict[str, Any], location: str, keywords: str, page: int
+    user_data_dir: Path, location: str, keywords: str, page: int
 ) -> list[str]:
-    """Verilen `storage_state`'i yeni, gorunmez (`headless=True`) bir
-    tarayici baglaminda yukleyip, (location, keywords) sorgusu icin
-    LinkedIn is arama sonuclarinin `page`.sayfasindaki (0-indexed) ilanlarini
-    BIZIM tanimladigimiz, kararli bir sentetik HTML olarak doner (bkz. modul
-    dokumaninin "M10.2 mimari evrimi"/"Mimari sinir" notlari).
+    """Verilen kalici Chromium profilini (`user_data_dir` - hesap-bazli,
+    bkz. session_manager.py) yeni, gorunmez (`headless=True`) bir
+    `launch_persistent_context()` baglaminda acip, (location, keywords)
+    sorgusu icin LinkedIn is arama sonuclarinin `page`.sayfasindaki
+    (0-indexed) ilanlarini BIZIM tanimladigimiz, kararli bir sentetik HTML
+    olarak doner (bkz. modul dokumaninin "M10.2 mimari evrimi"/"Mimari
+    sinir" notlari).
 
     Playwright HALA TAM olarak ayni sekilde oturum/kimlik dogrulama/gezinmeyi
-    yonetir (`browser.new_context(storage_state=...)`, `page.goto(...)`) -
+    yonetir (`launch_persistent_context(user_data_dir=...)`, `page.goto(...)`
+    - ONCEKI `browser.new_context(storage_state=...)`'in yerini alir, bkz.
+    `perform_interactive_login()`'in kendi "Mimari degisiklik" notu) -
     DEGISEN TEK SEY, ilan verisinin NEREDEN okundugudur: LinkedIn'in kendi
     istemci tarafi React arayuzunun (bir hydration hatasi nedeniyle DOM'a
     hicbir zaman monte ETMEDIGI - ampirik olarak dogrulandi) render edilmis
@@ -469,9 +501,8 @@ def fetch_search_results_page(
     Tarayici, basarili/basarisiz her durumda kapatilir (try/finally).
     """
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        context = playwright.chromium.launch_persistent_context(str(user_data_dir), headless=True)
         try:
-            context = browser.new_context(storage_state=storage_state)
             page_obj = context.new_page()
 
             captured_cards_body: list[str] = []
@@ -584,4 +615,4 @@ def fetch_search_results_page(
                 )
             return results
         finally:
-            browser.close()
+            context.close()

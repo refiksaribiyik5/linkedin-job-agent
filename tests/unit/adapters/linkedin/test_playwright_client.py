@@ -1,4 +1,5 @@
-"""playwright_client.py icin birim testleri (Roadmap M3.1).
+"""playwright_client.py icin birim testleri (Roadmap M3.1; Faz 13:
+storage_state snapshot -> persistent Chromium profili mimari gecisi).
 
 Gercek bir tarayici/LinkedIn'e HICBIR ZAMAN dokunulmaz - `sync_playwright`
 tamamen sahtelenir (monkeypatch). Bu, hem CI'da calisabilmesini hem de
@@ -6,6 +7,17 @@ tamamen sahtelenir (monkeypatch). Bu, hem CI'da calisabilmesini hem de
 tasarim kararinin (proje talimatiyla onaylandi) test edilebilir tek yolu
 olmasini saglar - gercek bir insan mudahalesi gerektiren akisi otomatik
 test etmenin baska bir yolu yoktur.
+
+**Faz 13 mimari degisikligi (bu dosyanin kendisi icin onemli):** ONCEKI
+sahte altyapi `chromium.launch()` + `browser.new_context(storage_state=...)`
+ikilisini modelliyordu (`_FakeBrowser` + `_FakeContext` ayri nesnelerdi).
+Yeni mimaride HER UC fonksiyon `chromium.launch_persistent_context(
+user_data_dir, ...)` kullanir - bu, gercek Playwright'ta da AYRI bir
+Browser nesnesi DONDURMEZ, dogrudan bir `BrowserContext`tir. Bu yuzden
+`_FakeBrowser` sinifi KALDIRILDI; `_FakeContext` artik KENDI `close()`/
+`closed` durumunu tasir (`browser.closed` -> `context.closed`). `dict`
+(storage_state) parametreleri, disposable, GERCEK-OLMAYAN `tmp_path`
+tabanli `Path` (profil dizini) parametreleriyle degistirildi.
 """
 
 from __future__ import annotations
@@ -34,6 +46,15 @@ from linkedinbot.adapters.linkedin.playwright_client import (
 )
 
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def profile_dir(tmp_path: Path) -> Path:
+    """Disposable, GERCEK-OLMAYAN bir hesap-bazli profil dizini yolu -
+    testler arasi hicbir gercek LinkedIn profiline (`browser-profile/`)
+    dokunulmaz/okunmaz (bkz. proje talimatinin "testlerde gercek profile
+    kullanma" kurali)."""
+    return tmp_path / "profile"
 
 
 class _FakeGotoResponse:
@@ -127,39 +148,31 @@ class _FakeResponse:
 
 
 class _FakeContext:
+    """`launch_persistent_context()`'in dondurdugu TEK nesnenin sahtesi -
+    ONCEKI mimarideki ayri `_FakeBrowser`+`_FakeContext` ikilisinin YERINI
+    alir (gercek Playwright'ta da `launch_persistent_context()` ayri bir
+    Browser nesnesi DONDURMEZ, dogrudan bir BrowserContext'tir - bu yuzden
+    kapanma durumu (`closed`) artik BU sinifin kendi sorumlulugudur)."""
+
     def __init__(self, page: _FakePage):
         self._page = page
-        self.storage_state_return = {"cookies": [{"name": "li_at", "value": "fake-session"}]}
+        self.closed = False
 
     def new_page(self) -> _FakePage:
         return self._page
-
-    def storage_state(self) -> dict:
-        return self.storage_state_return
-
-
-class _FakeBrowser:
-    def __init__(self, context: _FakeContext):
-        self._context = context
-        self.closed = False
-        self.new_context_kwargs: dict | None = None
-
-    def new_context(self, **kwargs) -> _FakeContext:
-        self.new_context_kwargs = kwargs
-        return self._context
 
     def close(self) -> None:
         self.closed = True
 
 
 class _FakeChromium:
-    def __init__(self, browser: _FakeBrowser):
-        self._browser = browser
-        self.launch_kwargs: dict | None = None
+    def __init__(self, context: _FakeContext):
+        self._context = context
+        self.launch_persistent_context_calls: list[tuple[str, dict]] = []
 
-    def launch(self, **kwargs) -> _FakeBrowser:
-        self.launch_kwargs = kwargs
-        return self._browser
+    def launch_persistent_context(self, user_data_dir: str, **kwargs) -> _FakeContext:
+        self.launch_persistent_context_calls.append((user_data_dir, kwargs))
+        return self._context
 
 
 class _FakePlaywright:
@@ -186,8 +199,7 @@ def _install_fake_playwright(
         goto_status=goto_status,
     )
     context = _FakeContext(page)
-    browser = _FakeBrowser(context)
-    chromium = _FakeChromium(browser)
+    chromium = _FakeChromium(context)
     playwright_obj = _FakePlaywright(chromium)
 
     @contextmanager
@@ -195,31 +207,33 @@ def _install_fake_playwright(
         yield playwright_obj
 
     monkeypatch.setattr(module_under_test, "sync_playwright", _fake_sync_playwright)
-    return page, context, browser, chromium
+    return page, context, chromium
 
 
-def test_perform_interactive_login_launches_headed_browser(monkeypatch):
+def test_perform_interactive_login_launches_headed_browser(monkeypatch, profile_dir):
     # "headless=False" kritik - kullanicinin GORUP kendi kimlik bilgilerini
     # girebilecegi bir pencere olmadan interaktif giris imkansizdir.
-    _page, _context, _browser, chromium = _install_fake_playwright(monkeypatch)
+    _page, _context, chromium = _install_fake_playwright(monkeypatch)
 
-    perform_interactive_login()
+    perform_interactive_login(profile_dir)
 
-    assert chromium.launch_kwargs == {"headless": False}
+    user_data_dir, kwargs = chromium.launch_persistent_context_calls[0]
+    assert user_data_dir == str(profile_dir)
+    assert kwargs == {"headless": False}
 
 
-def test_perform_interactive_login_navigates_to_linkedin_login_page(monkeypatch):
-    page, _context, _browser, _chromium = _install_fake_playwright(monkeypatch)
+def test_perform_interactive_login_navigates_to_linkedin_login_page(monkeypatch, profile_dir):
+    page, _context, _chromium = _install_fake_playwright(monkeypatch)
 
-    perform_interactive_login()
+    perform_interactive_login(profile_dir)
 
     assert page.goto_calls == [LOGIN_URL]
 
 
-def test_perform_interactive_login_waits_for_authenticated_redirect(monkeypatch):
-    page, _context, _browser, _chromium = _install_fake_playwright(monkeypatch)
+def test_perform_interactive_login_waits_for_authenticated_redirect(monkeypatch, profile_dir):
+    page, _context, _chromium = _install_fake_playwright(monkeypatch)
 
-    perform_interactive_login()
+    perform_interactive_login(profile_dir)
 
     assert len(page.wait_for_url_calls) == 1
     pattern, timeout = page.wait_for_url_calls[0]
@@ -227,170 +241,160 @@ def test_perform_interactive_login_waits_for_authenticated_redirect(monkeypatch)
     assert timeout > 0
 
 
-def test_perform_interactive_login_returns_storage_state_on_success(monkeypatch):
-    _page, context, _browser, _chromium = _install_fake_playwright(monkeypatch)
+def test_perform_interactive_login_creates_profile_directory_with_restricted_permissions(
+    monkeypatch, tmp_path
+):
+    # Faz 13: kalici profil dizini (henuz yoksa) burada olusturulur, 0700
+    # izniyle - authentication state tasiyacagi icin (secrets/ dizini icin
+    # TDD Section 24'un ZATEN uyguladigi ayni disiplin).
+    _install_fake_playwright(monkeypatch)
+    account_profile_dir = tmp_path / "browser-profile" / "some-account-id"
 
-    result = perform_interactive_login()
+    perform_interactive_login(account_profile_dir)
 
-    assert result == context.storage_state_return
-
-
-def test_perform_interactive_login_closes_browser_after_success(monkeypatch):
-    _page, _context, browser, _chromium = _install_fake_playwright(monkeypatch)
-
-    perform_interactive_login()
-
-    assert browser.closed is True
+    assert account_profile_dir.exists()
+    assert account_profile_dir.stat().st_mode & 0o777 == 0o700
 
 
-def test_perform_interactive_login_raises_login_timeout_error_on_timeout(monkeypatch):
-    _page, _context, _browser, _chromium = _install_fake_playwright(
+def test_perform_interactive_login_closes_context_after_success(monkeypatch, profile_dir):
+    _page, context, _chromium = _install_fake_playwright(monkeypatch)
+
+    perform_interactive_login(profile_dir)
+
+    assert context.closed is True
+
+
+def test_perform_interactive_login_raises_login_timeout_error_on_timeout(monkeypatch, profile_dir):
+    _page, _context, _chromium = _install_fake_playwright(
         monkeypatch, raise_on_wait=PlaywrightTimeoutError("Timeout 300000ms exceeded")
     )
 
     with pytest.raises(LoginTimeoutError):
-        perform_interactive_login()
+        perform_interactive_login(profile_dir)
 
 
-def test_perform_interactive_login_closes_browser_even_on_timeout(monkeypatch):
+def test_perform_interactive_login_closes_context_even_on_timeout(monkeypatch, profile_dir):
     # Ic-denetim odakli test: tarayici penceresi acik birakilirsa (orn.
     # kullanici 2FA'yi tamamlamazsa) surec sonsuza kadar asili kalan bir
     # tarayici surecine neden olabilir - try/finally bunu onlemeli.
-    _page, _context, browser, _chromium = _install_fake_playwright(
+    _page, context, _chromium = _install_fake_playwright(
         monkeypatch, raise_on_wait=PlaywrightTimeoutError("Timeout 300000ms exceeded")
     )
 
     with pytest.raises(LoginTimeoutError):
-        perform_interactive_login()
+        perform_interactive_login(profile_dir)
 
-    assert browser.closed is True
+    assert context.closed is True
 
 
-def test_perform_interactive_login_timeout_message_is_actionable(monkeypatch):
+def test_perform_interactive_login_timeout_message_is_actionable(monkeypatch, profile_dir):
     # Ham Playwright TimeoutError'i ("Timeout 300000ms exceeded") "ne
     # bekleniyordu" baglami tasimaz - kullaniciya giris/2FA'nin
     # tamamlanmadigini acikca soyleyen bir mesaj gerekir.
-    _page, _context, _browser, _chromium = _install_fake_playwright(
+    _page, _context, _chromium = _install_fake_playwright(
         monkeypatch, raise_on_wait=PlaywrightTimeoutError("Timeout 300000ms exceeded")
     )
 
     with pytest.raises(LoginTimeoutError, match="giris"):
-        perform_interactive_login()
+        perform_interactive_login(profile_dir)
 
 
 # ---------------------------------------------------------------------------
-# check_session_is_valid (Roadmap M3.2) - kayitli bir storage_state'in HALA
-# gecerli olup olmadigini, insan mudahalesi olmadan (headless), canli olarak
-# kontrol eder. M3.1'in interaktif giris akisindan farkli olarak burada
-# beklenen bir "insan tamamlar" adimi yoktur - ya oturum kabul edilir ya da
-# edilmez, sonuc `goto()` tamamlaninca zaten bellidir.
+# check_session_is_valid (Roadmap M3.2) - kayitli bir kalici Chromium
+# profilinin HALA gecerli olup olmadigini, insan mudahalesi olmadan
+# (headless), canli olarak kontrol eder. M3.1'in interaktif giris akisindan
+# farkli olarak burada beklenen bir "insan tamamlar" adimi yoktur - ya
+# oturum kabul edilir ya da edilmez, sonuc `goto()` tamamlaninca zaten
+# bellidir.
 # ---------------------------------------------------------------------------
 
-FAKE_STORED_STATE = {"cookies": [{"name": "li_at", "value": "previously-stored-session"}]}
 
-
-def test_check_session_is_valid_launches_headless_browser(monkeypatch):
+def test_check_session_is_valid_launches_headless_browser(monkeypatch, profile_dir):
     # M3.1'in aksine burada hicbir insan mudahalesi beklenmez - gorunur bir
     # pencereye gerek yoktur.
-    _page, _context, _browser, chromium = _install_fake_playwright(
-        monkeypatch, landing_url=SESSION_CHECK_URL
-    )
+    _page, _context, chromium = _install_fake_playwright(monkeypatch, landing_url=SESSION_CHECK_URL)
 
-    check_session_is_valid(FAKE_STORED_STATE)
+    check_session_is_valid(profile_dir)
 
-    assert chromium.launch_kwargs == {"headless": True}
-
-
-def test_check_session_is_valid_loads_the_given_storage_state(monkeypatch):
-    _page, _context, browser, _chromium = _install_fake_playwright(
-        monkeypatch, landing_url=SESSION_CHECK_URL
-    )
-
-    check_session_is_valid(FAKE_STORED_STATE)
-
-    assert browser.new_context_kwargs == {"storage_state": FAKE_STORED_STATE}
+    user_data_dir, kwargs = chromium.launch_persistent_context_calls[0]
+    assert user_data_dir == str(profile_dir)
+    assert kwargs == {"headless": True}
 
 
-def test_check_session_is_valid_navigates_to_session_check_url(monkeypatch):
-    page, _context, _browser, _chromium = _install_fake_playwright(
-        monkeypatch, landing_url=SESSION_CHECK_URL
-    )
+def test_check_session_is_valid_navigates_to_session_check_url(monkeypatch, profile_dir):
+    page, _context, _chromium = _install_fake_playwright(monkeypatch, landing_url=SESSION_CHECK_URL)
 
-    check_session_is_valid(FAKE_STORED_STATE)
+    check_session_is_valid(profile_dir)
 
     assert page.goto_calls == [SESSION_CHECK_URL]
 
 
-def test_check_session_is_valid_returns_true_when_still_on_authenticated_page(monkeypatch):
-    _page, _context, _browser, _chromium = _install_fake_playwright(
-        monkeypatch, landing_url=SESSION_CHECK_URL
-    )
+def test_check_session_is_valid_returns_true_when_still_on_authenticated_page(
+    monkeypatch, profile_dir
+):
+    _install_fake_playwright(monkeypatch, landing_url=SESSION_CHECK_URL)
 
-    assert check_session_is_valid(FAKE_STORED_STATE) is True
+    assert check_session_is_valid(profile_dir) is True
 
 
-def test_check_session_is_valid_returns_false_when_redirected_to_login(monkeypatch):
+def test_check_session_is_valid_returns_false_when_redirected_to_login(monkeypatch, profile_dir):
     # Sunucu tarafinda gecersiz/suresi dolmus bir oturum, LinkedIn'i
     # dogrudan giris sayfasina yonlendirmeye zorlar - bu, "invalidate the
     # session by deleting a cookie" (Roadmap M3.2 Tamamlanma Dogrulamasi)
     # senaryosunun canli davranis karsiligidir.
-    _page, _context, _browser, _chromium = _install_fake_playwright(
-        monkeypatch, landing_url="https://www.linkedin.com/login"
-    )
+    _install_fake_playwright(monkeypatch, landing_url="https://www.linkedin.com/login")
 
-    assert check_session_is_valid(FAKE_STORED_STATE) is False
+    assert check_session_is_valid(profile_dir) is False
 
 
-def test_check_session_is_valid_closes_browser_after_check(monkeypatch):
-    _page, _context, browser, _chromium = _install_fake_playwright(
-        monkeypatch, landing_url=SESSION_CHECK_URL
-    )
+def test_check_session_is_valid_closes_context_after_check(monkeypatch, profile_dir):
+    _page, context, _chromium = _install_fake_playwright(monkeypatch, landing_url=SESSION_CHECK_URL)
 
-    check_session_is_valid(FAKE_STORED_STATE)
+    check_session_is_valid(profile_dir)
 
-    assert browser.closed is True
+    assert context.closed is True
 
 
-def test_check_session_is_valid_closes_browser_even_if_navigation_fails(monkeypatch):
-    _page, _context, browser, _chromium = _install_fake_playwright(
+def test_check_session_is_valid_closes_context_even_if_navigation_fails(monkeypatch, profile_dir):
+    _page, context, _chromium = _install_fake_playwright(
         monkeypatch, raise_on_goto=RuntimeError("simulated network failure")
     )
 
     with pytest.raises(RuntimeError, match="simulated network failure"):
-        check_session_is_valid(FAKE_STORED_STATE)
+        check_session_is_valid(profile_dir)
 
-    assert browser.closed is True
+    assert context.closed is True
 
 
-def test_check_session_is_valid_does_not_reclassify_navigation_errors(monkeypatch):
+def test_check_session_is_valid_does_not_reclassify_navigation_errors(monkeypatch, profile_dir):
     # Onemli ayrim (TDD Section 20: TransientError vs PermanentError): bir
     # ag/navigasyon hatasi "oturum gecersiz" DEGILDIR. check_session_is_valid()
     # bu hatayi SESSIZCE False'a cevirmemeli/yutmamalidir - ham hata oldugu
     # gibi yukari sizmalidir (siniflandirma cagiranin/gelecekteki M9.3'un
     # isidir).
-    _page, _context, _browser, _chromium = _install_fake_playwright(
-        monkeypatch, raise_on_goto=RuntimeError("simulated network failure")
-    )
+    _install_fake_playwright(monkeypatch, raise_on_goto=RuntimeError("simulated network failure"))
 
     with pytest.raises(RuntimeError, match="simulated network failure"):
-        check_session_is_valid(FAKE_STORED_STATE)
+        check_session_is_valid(profile_dir)
 
 
-def test_check_session_is_valid_logs_no_warning_when_session_is_valid(monkeypatch, caplog):
+def test_check_session_is_valid_logs_no_warning_when_session_is_valid(
+    monkeypatch, caplog, profile_dir
+):
     # M12'nin canli dogrulamasi sirasinda bulunan bir gozlemlenebilirlik
     # boslugunun kapatilmasi: teshis loglamasi YALNIZCA basarisiz (gecersiz)
     # durumda tetiklenmeli - basarili yolun davranisi/log ciktisi degismemeli.
     _install_fake_playwright(monkeypatch, landing_url=SESSION_CHECK_URL)
 
     with caplog.at_level("WARNING", logger=module_under_test.__name__):
-        result = check_session_is_valid(FAKE_STORED_STATE)
+        result = check_session_is_valid(profile_dir)
 
     assert result is True
     assert caplog.records == []
 
 
 def test_check_session_is_valid_logs_sanitized_redirect_url_and_status_on_failure(
-    monkeypatch, caplog
+    monkeypatch, caplog, profile_dir
 ):
     _install_fake_playwright(
         monkeypatch,
@@ -399,7 +403,7 @@ def test_check_session_is_valid_logs_sanitized_redirect_url_and_status_on_failur
     )
 
     with caplog.at_level("WARNING", logger=module_under_test.__name__):
-        result = check_session_is_valid(FAKE_STORED_STATE)
+        result = check_session_is_valid(profile_dir)
 
     assert result is False
     assert len(caplog.records) == 1
@@ -413,21 +417,29 @@ def test_check_session_is_valid_logs_sanitized_redirect_url_and_status_on_failur
     assert "super-secret-value" not in message
 
 
-def test_check_session_is_valid_never_logs_the_storage_state_value_on_failure(monkeypatch, caplog):
-    # Cerez/storage_state DEGERLERI (ornegin gercek oturum token'i) hicbir
-    # kosulda loglanmamalidir - yalnizca gidilen sayfanin (sanitize edilmis)
-    # yolu ve HTTP durumu loglanir.
+def test_check_session_is_valid_never_logs_the_profile_directory_path(
+    monkeypatch, caplog, tmp_path
+):
+    # Cerez/profil DEGERLERI hicbir kosulda loglanmamalidir - yalnizca
+    # gidilen sayfanin (sanitize edilmis) yolu ve HTTP durumu loglanir. Faz
+    # 13'te bu endise yapisal olarak daha da guclendi:
+    # check_session_is_valid() artik cerez DEGERLERINI (bir dict olarak)
+    # hic almiyor - yalnizca bir dizin YOLU aliyor; bu test o yolun KENDISI
+    # de loglanmadigini dogrular.
+    secret_profile_dir = tmp_path / "super-secret-profile-name"
     _install_fake_playwright(
         monkeypatch, landing_url="https://www.linkedin.com/login", goto_status=200
     )
 
     with caplog.at_level("WARNING", logger=module_under_test.__name__):
-        check_session_is_valid(FAKE_STORED_STATE)
+        check_session_is_valid(secret_profile_dir)
 
-    assert "previously-stored-session" not in caplog.text
+    assert str(secret_profile_dir) not in caplog.text
 
 
-def test_check_session_is_valid_logs_null_status_when_goto_returns_none(monkeypatch, caplog):
+def test_check_session_is_valid_logs_null_status_when_goto_returns_none(
+    monkeypatch, caplog, profile_dir
+):
     # `page.goto()`'nun dondurdugu yanitin `.status`'u bilinmiyorsa (orn.
     # `None`), teshis loglamasi bunu bir hataya (AttributeError/format hatasi)
     # DONUSTURMEDEN, sadece "durum bilinmiyor" olarak loglamalidir.
@@ -436,7 +448,7 @@ def test_check_session_is_valid_logs_null_status_when_goto_returns_none(monkeypa
     )
 
     with caplog.at_level("WARNING", logger=module_under_test.__name__):
-        result = check_session_is_valid(FAKE_STORED_STATE)
+        result = check_session_is_valid(profile_dir)
 
     assert result is False
     assert len(caplog.records) == 1
@@ -445,7 +457,7 @@ def test_check_session_is_valid_logs_null_status_when_goto_returns_none(monkeypa
 
 # ---------------------------------------------------------------------------
 # fetch_search_results_page (Roadmap M3.3; M10.2 mimari evrimi) - kalici bir
-# storage_state'i yukleyip, verilen (location, keywords) sorgusu icin
+# Chromium profilini yukleyip, verilen (location, keywords) sorgusu icin
 # belirtilen sayfadaki ilanlari, LinkedIn'in KENDI (belgesiz) API'sinin ag
 # yaniti govdelerinden (DOM'dan DEGIL - bkz. playwright_client.py'nin modul
 # dokumaninin "M10.2 mimari evrimi" notu) BIZIM tanimladigimiz sentetik bir
@@ -522,34 +534,28 @@ def _descriptions_response_body(descriptions_by_job_id: dict[str, str]) -> str:
     return json.dumps({"included": included})
 
 
-def test_fetch_search_results_page_launches_headless_browser(monkeypatch):
+def test_fetch_search_results_page_launches_headless_browser(monkeypatch, profile_dir):
     # Toplama otomatik/gozetimsiz calisir (ASM-8) - M3.1'in interaktif
     # girisinin aksine burada insan mudahalesi beklenmez.
-    _page, _context, _browser, chromium = _install_fake_playwright(
+    _page, _context, chromium = _install_fake_playwright(
         monkeypatch, response_events=[(_CARDS_RESPONSE_URL, _cards_response_body())]
     )
 
-    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
-    assert chromium.launch_kwargs == {"headless": True}
+    user_data_dir, kwargs = chromium.launch_persistent_context_calls[0]
+    assert user_data_dir == str(profile_dir)
+    assert kwargs == {"headless": True}
 
 
-def test_fetch_search_results_page_loads_the_given_storage_state(monkeypatch):
-    _page, _context, browser, _chromium = _install_fake_playwright(
+def test_fetch_search_results_page_navigates_to_search_url_with_query_params(
+    monkeypatch, profile_dir
+):
+    page, _context, _chromium = _install_fake_playwright(
         monkeypatch, response_events=[(_CARDS_RESPONSE_URL, _cards_response_body())]
     )
 
-    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
-
-    assert browser.new_context_kwargs == {"storage_state": FAKE_STORED_STATE}
-
-
-def test_fetch_search_results_page_navigates_to_search_url_with_query_params(monkeypatch):
-    page, _context, _browser, _chromium = _install_fake_playwright(
-        monkeypatch, response_events=[(_CARDS_RESPONSE_URL, _cards_response_body())]
-    )
-
-    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales" OR "Key Account"', 2)
+    fetch_search_results_page(profile_dir, "Istanbul", '"Sales" OR "Key Account"', 2)
 
     assert len(page.goto_calls) == 1
     url = page.goto_calls[0]
@@ -560,19 +566,17 @@ def test_fetch_search_results_page_navigates_to_search_url_with_query_params(mon
     assert "start=50" in url
 
 
-def test_fetch_search_results_page_first_page_starts_at_zero(monkeypatch):
-    page, _context, _browser, _chromium = _install_fake_playwright(
+def test_fetch_search_results_page_first_page_starts_at_zero(monkeypatch, profile_dir):
+    page, _context, _chromium = _install_fake_playwright(
         monkeypatch, response_events=[(_CARDS_RESPONSE_URL, _cards_response_body())]
     )
 
-    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert "start=0" in page.goto_calls[0]
 
 
-def test_fetch_search_results_page_raises_when_no_cards_response_arrives(
-    monkeypatch,
-):
+def test_fetch_search_results_page_raises_when_no_cards_response_arrives(monkeypatch, profile_dir):
     # M11.1 (Roadmap Faz 11): yanit hic gelmemesi (zaman asimi) artik
     # sayfalamanin dogal sonuyla (bos liste) KARISTIRILMAZ - bu bir
     # aktarim/erisim sorunudur ve collector.py'nin retry/devre-kesici
@@ -580,50 +584,52 @@ def test_fetch_search_results_page_raises_when_no_cards_response_arrives(
     # asagidaki "cards_response_has_zero_elements" testi - GERCEKTEN
     # gelen ama sifir kart iceren bir yanit hala `[]` doner).
     monkeypatch.setattr(module_under_test, "_JOB_CARDS_RESPONSE_TIMEOUT_MS", 50)
-    _page, _context, browser, _chromium = _install_fake_playwright(monkeypatch, response_events=[])
+    _page, context, _chromium = _install_fake_playwright(monkeypatch, response_events=[])
 
     with pytest.raises(JobCardsResponseTimeoutError):
-        fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+        fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     # Diger her istisna-firlatma yolu icin zaten dogrulanan AYNI paylasilan
-    # finally: browser.close() garantisi - bkz.
-    # test_fetch_search_results_page_closes_browser_even_if_navigation_fails.
-    assert browser.closed is True
+    # finally: context.close() garantisi - bkz.
+    # test_fetch_search_results_page_closes_context_even_if_navigation_fails.
+    assert context.closed is True
 
 
 def test_fetch_search_results_page_returns_empty_list_when_cards_response_has_zero_elements(
-    monkeypatch,
+    monkeypatch, profile_dir
 ):
-    _page, _context, _browser, _chromium = _install_fake_playwright(
+    _install_fake_playwright(
         monkeypatch, response_events=[(_CARDS_RESPONSE_URL, _cards_response_body())]
     )
 
-    assert fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0) == []
+    assert fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0) == []
 
 
-def test_fetch_search_results_page_closes_browser_after_fetch(monkeypatch):
-    _page, _context, browser, _chromium = _install_fake_playwright(
+def test_fetch_search_results_page_closes_context_after_fetch(monkeypatch, profile_dir):
+    _page, context, _chromium = _install_fake_playwright(
         monkeypatch, response_events=[(_CARDS_RESPONSE_URL, _cards_response_body())]
     )
 
-    fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
-    assert browser.closed is True
+    assert context.closed is True
 
 
-def test_fetch_search_results_page_closes_browser_even_if_navigation_fails(monkeypatch):
-    _page, _context, browser, _chromium = _install_fake_playwright(
+def test_fetch_search_results_page_closes_context_even_if_navigation_fails(
+    monkeypatch, profile_dir
+):
+    _page, context, _chromium = _install_fake_playwright(
         monkeypatch, raise_on_goto=RuntimeError("simulated network failure")
     )
 
     with pytest.raises(RuntimeError, match="simulated network failure"):
-        fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+        fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
-    assert browser.closed is True
+    assert context.closed is True
 
 
 def test_fetch_search_results_page_keeps_cards_when_goto_times_out_after_capture(
-    monkeypatch,
+    monkeypatch, profile_dir
 ):
     # Regresyon testi (M10.2 duzeltmesi): canli bir Bootstrap calistirmasinda
     # kanitlanan gercek bir kusur. Kart yaniti basariyla geldi/yakalandi
@@ -643,7 +649,7 @@ def test_fetch_search_results_page_keeps_cards_when_goto_times_out_after_capture
             "time_at": 1785694003000,
         }
     )
-    _page, _context, browser, _chromium = _install_fake_playwright(
+    _page, context, _chromium = _install_fake_playwright(
         monkeypatch,
         response_events=[(_CARDS_RESPONSE_URL, cards_body)],
         raise_on_goto=PlaywrightTimeoutError(
@@ -651,15 +657,15 @@ def test_fetch_search_results_page_keeps_cards_when_goto_times_out_after_capture
         ),
     )
 
-    (result,) = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    (result,) = fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert 'data-job-id="555"' in result
     assert 'data-field="title">Trade Marketing Specialist<' in result
-    assert browser.closed is True
+    assert context.closed is True
 
 
 def test_fetch_search_results_page_still_raises_when_goto_times_out_and_no_cards_were_captured(
-    monkeypatch,
+    monkeypatch, profile_dir
 ):
     # Ayni kusurun DIGER yonu (Gereksinim 7: "genuine no response ever
     # arrived" durumu icin mevcut retry davranisi korunmali): eger kart
@@ -667,7 +673,7 @@ def test_fetch_search_results_page_still_raises_when_goto_times_out_and_no_cards
     # yukari (cagiran `_fetch_page_with_retry`'nin retry mekanizmasina)
     # sizmalidir - aksi halde gercek bir ag/erisim sorunu sessizce yutulup
     # bos bir sonuc olarak yanlis yorumlanirdi.
-    _page, _context, browser, _chromium = _install_fake_playwright(
+    _page, context, _chromium = _install_fake_playwright(
         monkeypatch,
         response_events=[],
         raise_on_goto=PlaywrightTimeoutError(
@@ -676,12 +682,14 @@ def test_fetch_search_results_page_still_raises_when_goto_times_out_and_no_cards
     )
 
     with pytest.raises(PlaywrightTimeoutError):
-        fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+        fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
-    assert browser.closed is True
+    assert context.closed is True
 
 
-def test_fetch_search_results_page_builds_synthetic_html_from_a_real_response(monkeypatch):
+def test_fetch_search_results_page_builds_synthetic_html_from_a_real_response(
+    monkeypatch, profile_dir
+):
     cards_body = _cards_response_body(
         {
             "job_id": "555",
@@ -692,7 +700,7 @@ def test_fetch_search_results_page_builds_synthetic_html_from_a_real_response(mo
         }
     )
     descriptions_body = _descriptions_response_body({"555": "We are hiring a Sales Executive."})
-    _page, _context, _browser, _chromium = _install_fake_playwright(
+    _page, _context, _chromium = _install_fake_playwright(
         monkeypatch,
         response_events=[
             (_CARDS_RESPONSE_URL, cards_body),
@@ -700,7 +708,7 @@ def test_fetch_search_results_page_builds_synthetic_html_from_a_real_response(mo
         ],
     )
 
-    (result,) = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    (result,) = fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert 'data-job-id="555"' in result
     assert 'data-field="title">Sales Executive<' in result
@@ -711,7 +719,7 @@ def test_fetch_search_results_page_builds_synthetic_html_from_a_real_response(mo
     assert 'href="https://www.linkedin.com/jobs/view/555/"' in result
 
 
-def test_fetch_search_results_page_preserves_order_across_multiple_cards(monkeypatch):
+def test_fetch_search_results_page_preserves_order_across_multiple_cards(monkeypatch, profile_dir):
     cards_body = _cards_response_body(
         *[
             {
@@ -725,7 +733,7 @@ def test_fetch_search_results_page_preserves_order_across_multiple_cards(monkeyp
         ]
     )
     descriptions_body = _descriptions_response_body({str(i): f"desc {i}" for i in range(3)})
-    _page, _context, _browser, _chromium = _install_fake_playwright(
+    _page, _context, _chromium = _install_fake_playwright(
         monkeypatch,
         response_events=[
             (_CARDS_RESPONSE_URL, cards_body),
@@ -733,13 +741,15 @@ def test_fetch_search_results_page_preserves_order_across_multiple_cards(monkeyp
         ],
     )
 
-    result = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    result = fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert [f'data-job-id="{i}"' in html for i, html in enumerate(result)] == [True, True, True]
     assert all(f"Title {i}" in result[i] for i in range(3))
 
 
-def test_fetch_search_results_page_escapes_html_special_characters_in_fields(monkeypatch):
+def test_fetch_search_results_page_escapes_html_special_characters_in_fields(
+    monkeypatch, profile_dir
+):
     cards_body = _cards_response_body(
         {
             "job_id": "555",
@@ -749,18 +759,16 @@ def test_fetch_search_results_page_escapes_html_special_characters_in_fields(mon
             "time_at": 1785694003000,
         }
     )
-    _page, _context, _browser, _chromium = _install_fake_playwright(
-        monkeypatch, response_events=[(_CARDS_RESPONSE_URL, cards_body)]
-    )
+    _install_fake_playwright(monkeypatch, response_events=[(_CARDS_RESPONSE_URL, cards_body)])
 
-    (result,) = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    (result,) = fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert "<script>" not in result
     assert "Title &lt;script&gt;&amp;&quot;" in result
 
 
 def test_fetch_search_results_page_description_is_empty_when_no_descriptions_response_arrives(
-    monkeypatch,
+    monkeypatch, profile_dir
 ):
     # Bir ilanin aciklamasi bulunamazsa (orn. aciklama yaniti hic gelmedi)
     # bos dize kalir - `extract_record()`'in KENDI "alan bulunamadi" kontrolu
@@ -775,16 +783,16 @@ def test_fetch_search_results_page_description_is_empty_when_no_descriptions_res
             "time_at": 1785694003000,
         }
     )
-    _page, _context, _browser, _chromium = _install_fake_playwright(
-        monkeypatch, response_events=[(_CARDS_RESPONSE_URL, cards_body)]
-    )
+    _install_fake_playwright(monkeypatch, response_events=[(_CARDS_RESPONSE_URL, cards_body)])
 
-    (result,) = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    (result,) = fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert 'data-field="description"></span>' in result
 
 
-def test_fetch_search_results_page_date_is_empty_when_listed_date_footer_item_missing(monkeypatch):
+def test_fetch_search_results_page_date_is_empty_when_listed_date_footer_item_missing(
+    monkeypatch, profile_dir
+):
     cards_body = _cards_response_body(
         {
             "job_id": "555",
@@ -794,16 +802,16 @@ def test_fetch_search_results_page_date_is_empty_when_listed_date_footer_item_mi
             "time_at": None,
         }
     )
-    _page, _context, _browser, _chromium = _install_fake_playwright(
-        monkeypatch, response_events=[(_CARDS_RESPONSE_URL, cards_body)]
-    )
+    _install_fake_playwright(monkeypatch, response_events=[(_CARDS_RESPONSE_URL, cards_body)])
 
-    (result,) = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    (result,) = fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert 'data-field="date"></span>' in result
 
 
-def test_fetch_search_results_page_handles_a_response_delayed_by_several_polls(monkeypatch):
+def test_fetch_search_results_page_handles_a_response_delayed_by_several_polls(
+    monkeypatch, profile_dir
+):
     # Ag yanitlari ASENKRON gelir (bkz. modul dokumaninin "M10.2 mimari
     # evrimi" notu) - `goto()`'nun ANINDA degil, birkac `wait_for_timeout()`
     # dongusunden SONRA gelen bir yaniti dogru sekilde yakalamalidir.
@@ -816,20 +824,20 @@ def test_fetch_search_results_page_handles_a_response_delayed_by_several_polls(m
             "time_at": 1785694003000,
         }
     )
-    page, _context, _browser, _chromium = _install_fake_playwright(
+    page, _context, _chromium = _install_fake_playwright(
         monkeypatch,
         response_events=[(_CARDS_RESPONSE_URL, cards_body)],
         response_event_delay_polls=3,
     )
 
-    result = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    result = fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert len(result) == 1
     assert len(page.wait_for_timeout_calls) >= 3
 
 
 def test_fetch_search_results_page_captures_description_when_its_url_also_matches_cards_marker(
-    monkeypatch,
+    monkeypatch, profile_dir
 ):
     # Regresyon testi (M10.2 duzeltmesi): canli bir hesaba karsi dogrulanan
     # gercek bir kusur. LinkedIn'in aciklama metnini tasiyan GraphQL
@@ -868,7 +876,7 @@ def test_fetch_search_results_page_captures_description_when_its_url_also_matche
     assert module_under_test._JOB_CARDS_RESPONSE_URL_MARKER not in _DESCRIPTIONS_RESPONSE_URL, (
         "duzeltilmis (capa'li) isaret, aciklama URL'siyle ARTIK eslesmemelidir"
     )
-    _page, _context, _browser, _chromium = _install_fake_playwright(
+    _install_fake_playwright(
         monkeypatch,
         response_events=[
             (_CARDS_RESPONSE_URL, cards_body),
@@ -876,13 +884,13 @@ def test_fetch_search_results_page_captures_description_when_its_url_also_matche
         ],
     )
 
-    (result,) = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    (result,) = fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert 'data-field="description">Real description text.<' in result
 
 
 def test_fetch_search_results_page_captures_description_when_it_arrives_before_any_cards_response(
-    monkeypatch,
+    monkeypatch, profile_dir
 ):
     # Ayni kusurun DIGER yonu: eger aciklama yaniti (her iki isaretle de
     # eslesen URL'siyle) kart-listesi yanitindan ONCE gelseydi, eski
@@ -901,7 +909,7 @@ def test_fetch_search_results_page_captures_description_when_it_arrives_before_a
         }
     )
     descriptions_body = _descriptions_response_body({"555": "Real description text."})
-    _page, _context, _browser, _chromium = _install_fake_playwright(
+    _install_fake_playwright(
         monkeypatch,
         response_events=[
             (_DESCRIPTIONS_RESPONSE_URL, descriptions_body),
@@ -909,7 +917,7 @@ def test_fetch_search_results_page_captures_description_when_it_arrives_before_a
         ],
     )
 
-    (result,) = fetch_search_results_page(FAKE_STORED_STATE, "Istanbul", '"Sales"', 0)
+    (result,) = fetch_search_results_page(profile_dir, "Istanbul", '"Sales"', 0)
 
     assert 'data-job-id="555"' in result
     assert 'data-field="description">Real description text.<' in result

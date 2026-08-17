@@ -122,6 +122,7 @@ def build_dependencies(
     config_dir: Path,
     reports_dir: Path,
     secrets_file: Path,
+    profile_dir: Path,
 ) -> OrchestratorDependencies:
     """TDD Section 9 "Süreç modeli"nin hem manuel ("ayrı bir kısa ömürlü
     süreç olarak Orchestrator'ı doğrudan çağırır", M9.7/`cli.py`) hem
@@ -134,6 +135,15 @@ def build_dependencies(
     EDILMEDEN once retry parametrelerine ihtiyac vardir ve `orchestrator.run()`
     kendi config yuklemesini disaridan bir parametre olarak KABUL ETMEZ
     (imzasi degistirilmez, "Preserve existing public APIs").
+
+    `profile_dir` (Faz 13, persistent Chromium profili mimarisi):
+    `secrets_file` ile AYNI desende (CLI/main.py'nin AYNI "altyapi yolu"
+    parametreleri) - `SessionManager`'a KOK profil dizini olarak enjekte
+    edilir; hesap-bazli alt-dizin (`<profile_dir>/<account_id>/`) HER
+    cagrida `SessionManager._profile_dir()` tarafindan hesaplanir (bkz.
+    session_manager.py). `LocalKeyringSecretsProvider`, ARTIK yalnizca
+    `anthropic_api_key` icin kullanilir - LinkedIn oturumu icin KULLANILMAZ
+    (bkz. session_manager.py modul dokumaninin "Mimari degisiklik" notu).
     """
     account_context = load_account_context(account_id, session)
     thresholds = account_context.config_profile.thresholds
@@ -143,7 +153,7 @@ def build_dependencies(
 
     linkedin_port = SessionManager(
         session,
-        secrets_provider,
+        profile_dir,
         perform_interactive_login,
         check_session_is_valid,
         fetch_search_results_page,

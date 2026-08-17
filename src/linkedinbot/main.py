@@ -187,7 +187,7 @@ def _session_is_currently_invalid(
 
 
 def _make_on_trigger(
-    config_dir: Path, reports_dir: Path, secrets_file: Path
+    config_dir: Path, reports_dir: Path, secrets_file: Path, profile_dir: Path
 ) -> Callable[[UUID], None]:
     """`APSchedulerAdapter`'a enjekte edilecek `on_trigger`'i uretir.
 
@@ -219,7 +219,7 @@ def _make_on_trigger(
         session: Session = session_factory()
         try:
             dependencies = build_dependencies(
-                account_id, session, config_dir, reports_dir, secrets_file
+                account_id, session, config_dir, reports_dir, secrets_file, profile_dir
             )
             result = run_account(
                 account_id, dependencies, datetime.now(UTC), LOCK_DURATION, TriggerType.SCHEDULED
@@ -260,6 +260,7 @@ def run_forever(
     config_dir: Path,
     reports_dir: Path,
     secrets_file: Path,
+    profile_dir: Path,
     *,
     shutdown_event: threading.Event | None = None,
     register_signal_handlers: bool = True,
@@ -282,7 +283,7 @@ def run_forever(
         raw_scheduler = BackgroundScheduler()
         _attach_commit_listeners(raw_scheduler, scheduler_session)
 
-        on_trigger = _make_on_trigger(config_dir, reports_dir, secrets_file)
+        on_trigger = _make_on_trigger(config_dir, reports_dir, secrets_file, profile_dir)
         scheduler = APSchedulerAdapter(
             account_repository=account_repository, on_trigger=on_trigger, scheduler=raw_scheduler
         )
@@ -308,7 +309,8 @@ def main() -> None:
     config_dir = Path(os.environ.get("CONFIG_DIR", "config"))
     reports_dir = Path(os.environ.get("REPORTS_DIR", "reports"))
     secrets_file = Path(os.environ.get("SECRETS_FILE", "secrets.json"))
-    run_forever(account_id, config_dir, reports_dir, secrets_file)
+    profile_dir = Path(os.environ.get("BROWSER_PROFILE_DIR", "browser-profile"))
+    run_forever(account_id, config_dir, reports_dir, secrets_file, profile_dir)
 
 
 if __name__ == "__main__":

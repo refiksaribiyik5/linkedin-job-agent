@@ -507,7 +507,9 @@ def test_run_run_command_commits_and_closes_on_success(monkeypatch, capsys):
     monkeypatch.setattr(
         cli,
         "build_dependencies",
-        lambda account_id, session, config_dir, reports_dir, secrets_file: fake_dependencies,
+        lambda account_id, session, config_dir, reports_dir, secrets_file, profile_dir: (
+            fake_dependencies
+        ),
     )
 
     def _fake_run_account(account_id, dependencies, now, lock_duration, trigger_type):
@@ -517,7 +519,7 @@ def test_run_run_command_commits_and_closes_on_success(monkeypatch, capsys):
     monkeypatch.setattr(cli, "run_account", _fake_run_account)
 
     exit_code = cli._run_run_command(
-        ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json")
+        ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json"), Path("browser-profile")
     )
 
     assert exit_code == 0
@@ -546,12 +548,12 @@ def test_run_run_command_prints_message_and_returns_one_when_already_running(
     monkeypatch.setattr(
         cli,
         "build_dependencies",
-        lambda account_id, session, config_dir, reports_dir, secrets_file: object(),
+        lambda account_id, session, config_dir, reports_dir, secrets_file, profile_dir: object(),
     )
     monkeypatch.setattr(cli, "run_account", _raise_already_running)
 
     exit_code = cli._run_run_command(
-        ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json")
+        ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json"), Path("browser-profile")
     )
 
     assert exit_code == 1
@@ -568,13 +570,13 @@ def test_run_run_command_prints_message_and_returns_one_on_value_error(monkeypat
     monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
     monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
 
-    def _raise_value_error(account_id, session, config_dir, reports_dir, secrets_file):
+    def _raise_value_error(account_id, session, config_dir, reports_dir, secrets_file, profile_dir):
         raise ValueError("Secret bulunamadi: 'anthropic_api_key'")
 
     monkeypatch.setattr(cli, "build_dependencies", _raise_value_error)
 
     exit_code = cli._run_run_command(
-        ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json")
+        ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json"), Path("browser-profile")
     )
 
     assert exit_code == 1
@@ -588,7 +590,7 @@ def test_run_run_command_rolls_back_closes_and_reraises_on_unexpected_error(monk
     fake_session = _FakeSession()
     fake_engine = _FakeEngine()
 
-    def _raise_unexpected(account_id, session, config_dir, reports_dir, secrets_file):
+    def _raise_unexpected(account_id, session, config_dir, reports_dir, secrets_file, profile_dir):
         raise RuntimeError("unexpected boom")
 
     monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
@@ -596,7 +598,13 @@ def test_run_run_command_rolls_back_closes_and_reraises_on_unexpected_error(monk
     monkeypatch.setattr(cli, "build_dependencies", _raise_unexpected)
 
     with pytest.raises(RuntimeError, match="unexpected boom"):
-        cli._run_run_command(ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json"))
+        cli._run_run_command(
+            ACCOUNT_ID,
+            Path("config"),
+            Path("reports"),
+            Path("secrets.json"),
+            Path("browser-profile"),
+        )
 
     assert fake_session.rolled_back is True
     assert fake_session.closed is True
@@ -608,16 +616,23 @@ def test_main_run_command_dispatches_with_account_and_defaults(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_run_run_command",
-        lambda account_id, config_dir, reports_dir, secrets_file: calls.append(
-            (account_id, config_dir, reports_dir, secrets_file)
-        )
-        or 0,
+        lambda account_id, config_dir, reports_dir, secrets_file, profile_dir: (
+            calls.append((account_id, config_dir, reports_dir, secrets_file, profile_dir)) or 0
+        ),
     )
 
     exit_code = cli.main(["run", "--account", str(ACCOUNT_ID)])
 
     assert exit_code == 0
-    assert calls == [(ACCOUNT_ID, Path("config"), Path("reports"), Path("secrets.json"))]
+    assert calls == [
+        (
+            ACCOUNT_ID,
+            Path("config"),
+            Path("reports"),
+            Path("secrets.json"),
+            Path("browser-profile"),
+        )
+    ]
 
 
 def test_main_run_command_accepts_custom_paths(monkeypatch):
@@ -625,10 +640,9 @@ def test_main_run_command_accepts_custom_paths(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_run_run_command",
-        lambda account_id, config_dir, reports_dir, secrets_file: calls.append(
-            (account_id, config_dir, reports_dir, secrets_file)
-        )
-        or 0,
+        lambda account_id, config_dir, reports_dir, secrets_file, profile_dir: (
+            calls.append((account_id, config_dir, reports_dir, secrets_file, profile_dir)) or 0
+        ),
     )
 
     cli.main(
@@ -642,11 +656,19 @@ def test_main_run_command_accepts_custom_paths(monkeypatch):
             "/opt/reports",
             "--secrets-file",
             "/opt/secrets.json",
+            "--profile-dir",
+            "/opt/browser-profile",
         ]
     )
 
     assert calls == [
-        (ACCOUNT_ID, Path("/opt/custom-config"), Path("/opt/reports"), Path("/opt/secrets.json"))
+        (
+            ACCOUNT_ID,
+            Path("/opt/custom-config"),
+            Path("/opt/reports"),
+            Path("/opt/secrets.json"),
+            Path("/opt/browser-profile"),
+        )
     ]
 
 
@@ -657,7 +679,223 @@ def test_main_run_command_requires_account_argument():
 
 def test_main_run_command_propagates_nonzero_exit_code(monkeypatch):
     monkeypatch.setattr(
-        cli, "_run_run_command", lambda account_id, config_dir, reports_dir, secrets_file: 1
+        cli,
+        "_run_run_command",
+        lambda account_id, config_dir, reports_dir, secrets_file, profile_dir: 1,
     )
 
     assert cli.main(["run", "--account", str(ACCOUNT_ID)]) == 1
+
+
+# ---------------------------------------------------------------------------
+# `login` (Faz 13, persistent Chromium profili mimarisi) - `RunLock`'un
+# (DEGISTIRILMEDEN) yeniden kullanimini ve `perform_interactive_login()`'in
+# GERCEK Playwright'a hic dokunmadan (monkeypatch ile TAMAMEN degistirilir,
+# `_run_run_command`'in kendi test deseniyle AYNI) dogru sekilde
+# cagrildigini dogrular.
+# ---------------------------------------------------------------------------
+
+
+class _FakeAccountRepositoryForLogin:
+    def __init__(self, account: object | None):
+        self._account = account
+
+    def get_by_id(self, account_id):
+        return self._account
+
+
+def test_run_login_command_prints_active_run_message_and_returns_one_when_lock_busy(
+    monkeypatch, capsys
+):
+    # Madde 3 (RunLock): kilit alinamazsa HICBIR tarayici/Xvfb kaynagi
+    # ACILMADAN, kullanicidan acikca istenen SABIT Ingilizce mesajla 1
+    # donmelidir.
+    fake_session = _FakeSession()
+    fake_engine = _FakeEngine()
+    login_calls = []
+
+    monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
+    monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
+    monkeypatch.setattr(
+        cli,
+        "SqlAlchemyAccountRepository",
+        lambda session: _FakeAccountRepositoryForLogin(object()),
+    )
+
+    class _FakeRunLock:
+        def __init__(self, session):
+            pass
+
+        def acquire(self, account_id, lock_owner, now, lock_duration):
+            return False
+
+        def release(self, account_id, lock_owner):
+            raise AssertionError("kilit alinamadiginda release() ASLA cagrilmamali")
+
+    monkeypatch.setattr(cli, "RunLock", _FakeRunLock)
+    monkeypatch.setattr(
+        cli, "perform_interactive_login", lambda profile_dir: login_calls.append(profile_dir)
+    )
+
+    exit_code = cli._run_login_command(ACCOUNT_ID, Path("browser-profile"))
+
+    assert exit_code == 1
+    assert login_calls == []
+    assert "Account currently has an active pipeline run; login cannot start." in (
+        capsys.readouterr().err
+    )
+    assert fake_session.closed is True
+    assert fake_engine.disposed is True
+
+
+def test_run_login_command_acquires_lock_logs_in_and_releases_when_lock_free(monkeypatch, capsys):
+    # Madde 3: kilit bosken login akisi baslar; basari/basarisizlik fark
+    # etmeksizin `finally` icinde kilit serbest birakilir.
+    fake_session = _FakeSession()
+    fake_engine = _FakeEngine()
+    login_calls = []
+    release_calls = []
+    mark_valid_calls = []
+
+    monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
+    monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
+    monkeypatch.setattr(
+        cli,
+        "SqlAlchemyAccountRepository",
+        lambda session: _FakeAccountRepositoryForLogin(object()),
+    )
+
+    class _FakeRunLock:
+        def __init__(self, session):
+            pass
+
+        def acquire(self, account_id, lock_owner, now, lock_duration):
+            assert lock_owner.startswith("login-")
+            return True
+
+        def release(self, account_id, lock_owner):
+            release_calls.append((account_id, lock_owner))
+            return True
+
+    monkeypatch.setattr(cli, "RunLock", _FakeRunLock)
+    monkeypatch.setattr(
+        cli, "perform_interactive_login", lambda profile_dir: login_calls.append(profile_dir)
+    )
+    # Faz 13 regresyon duzeltmesi: basarili giris SONRASI `mark_session_valid()`
+    # cagrilmalidir (bkz. cli.py'nin kendi dokumani) - burada (birim test
+    # seviyesinde, DB'ye hic dokunmadan) YALNIZCA dogru argumanlarla
+    # cagrildigi dogrulanir; GERCEK DB davranisi
+    # tests/integration/db/test_cli_login.py'de dogrulanir.
+    monkeypatch.setattr(
+        cli,
+        "mark_session_valid",
+        lambda session, account_id: mark_valid_calls.append((session, account_id)),
+    )
+
+    exit_code = cli._run_login_command(ACCOUNT_ID, Path("browser-profile"))
+
+    assert exit_code == 0
+    assert login_calls == [Path("browser-profile") / str(ACCOUNT_ID)]
+    assert mark_valid_calls == [(fake_session, ACCOUNT_ID)]
+    assert len(release_calls) == 1
+    assert release_calls[0][0] == ACCOUNT_ID
+    assert "Login basarili" in capsys.readouterr().out
+    assert fake_session.closed is True
+    assert fake_engine.disposed is True
+
+
+def test_run_login_command_releases_lock_even_when_login_times_out(monkeypatch, capsys):
+    from linkedinbot.adapters.linkedin.playwright_client import LoginTimeoutError
+
+    fake_session = _FakeSession()
+    fake_engine = _FakeEngine()
+    release_calls = []
+    mark_valid_calls = []
+
+    monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
+    monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
+    monkeypatch.setattr(
+        cli,
+        "SqlAlchemyAccountRepository",
+        lambda session: _FakeAccountRepositoryForLogin(object()),
+    )
+
+    class _FakeRunLock:
+        def __init__(self, session):
+            pass
+
+        def acquire(self, account_id, lock_owner, now, lock_duration):
+            return True
+
+        def release(self, account_id, lock_owner):
+            release_calls.append((account_id, lock_owner))
+            return True
+
+    def _raise_timeout(profile_dir):
+        raise LoginTimeoutError("Interaktif LinkedIn girisi zaman asimina ugradi")
+
+    monkeypatch.setattr(cli, "RunLock", _FakeRunLock)
+    monkeypatch.setattr(cli, "perform_interactive_login", _raise_timeout)
+    monkeypatch.setattr(
+        cli,
+        "mark_session_valid",
+        lambda session, account_id: mark_valid_calls.append((session, account_id)),
+    )
+
+    exit_code = cli._run_login_command(ACCOUNT_ID, Path("browser-profile"))
+
+    assert exit_code == 1
+    assert len(release_calls) == 1
+    assert "zaman asimina ugradi" in capsys.readouterr().err
+    # Faz 13 regresyon duzeltmesi (madde 4): basarisiz giris SONRASI
+    # `mark_session_valid()` HICBIR ZAMAN cagrilmamalidir.
+    assert mark_valid_calls == []
+
+
+def test_run_login_command_prints_account_not_found_and_returns_one_without_touching_lock(
+    monkeypatch, capsys
+):
+    # orchestrator.py'nin KENDI "hesap dogrulamasi RunLock.acquire()'dan
+    # ONCE yapilir" kuralinin AYNISI - `run_locks.account_id`'nin FK
+    # kisiti geregi.
+    fake_session = _FakeSession()
+    fake_engine = _FakeEngine()
+
+    monkeypatch.setattr(cli, "create_db_engine", lambda: fake_engine)
+    monkeypatch.setattr(cli, "create_session_factory", lambda engine: (lambda: fake_session))
+    monkeypatch.setattr(
+        cli, "SqlAlchemyAccountRepository", lambda session: _FakeAccountRepositoryForLogin(None)
+    )
+
+    class _FakeRunLock:
+        def __init__(self, session):
+            pass
+
+        def acquire(self, account_id, lock_owner, now, lock_duration):
+            raise AssertionError("hesap yoksa RunLock.acquire() ASLA cagrilmamali")
+
+    monkeypatch.setattr(cli, "RunLock", _FakeRunLock)
+
+    exit_code = cli._run_login_command(ACCOUNT_ID, Path("browser-profile"))
+
+    assert exit_code == 1
+    assert "Hesap bulunamadi" in capsys.readouterr().err
+
+
+def test_main_login_command_dispatches_with_account_and_defaults(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "_run_login_command",
+        lambda account_id, profile_dir: calls.append((account_id, profile_dir)) or 0,
+    )
+
+    exit_code = cli.main(["login", "--account", str(ACCOUNT_ID)])
+
+    assert exit_code == 0
+    assert calls == [(ACCOUNT_ID, Path("browser-profile"))]
+
+
+def test_main_login_command_requires_account_argument():
+    with pytest.raises(SystemExit):
+        cli.main(["login"])

@@ -180,7 +180,9 @@ def test_make_on_trigger_passes_the_scheduled_trigger_type_and_cleans_up(monkeyp
     engines, sessions = _patch_db(monkeypatch)
     calls: list[tuple[UUID, TriggerType]] = []
 
-    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+    def _fake_build_dependencies(
+        account_id, session, config_dir, reports_dir, secrets_file, profile_dir
+    ):
         return "deps"
 
     def _fake_run_account(account_id, dependencies, now, lock_duration, trigger_type):
@@ -190,7 +192,9 @@ def test_make_on_trigger_passes_the_scheduled_trigger_type_and_cleans_up(monkeyp
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
     monkeypatch.setattr(main, "run_account", _fake_run_account)
 
-    on_trigger = main._make_on_trigger(Path("config"), Path("reports"), Path("secrets.json"))
+    on_trigger = main._make_on_trigger(
+        Path("config"), Path("reports"), Path("secrets.json"), Path("browser-profile")
+    )
     account_id = uuid4()
 
     on_trigger(account_id)
@@ -215,7 +219,9 @@ def test_make_on_trigger_rolls_back_and_still_cleans_up_on_failure(monkeypatch, 
     monkeypatch.setattr(main, "build_dependencies", _raise)
     monkeypatch.setattr(main, "run_account", lambda *args, **kwargs: None)
 
-    on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
+    on_trigger = main._make_on_trigger(
+        Path("config"), tmp_path, Path("secrets.json"), Path("browser-profile")
+    )
 
     with pytest.raises(RuntimeError, match="build_dependencies basarisiz oldu"):
         on_trigger(uuid4())
@@ -241,7 +247,9 @@ def test_make_on_trigger_writes_a_session_alert_when_revalidation_confirms_sessi
     engines, sessions = _patch_db(monkeypatch)
     fake_port = _FakeLinkedInPort(validate_error=SessionInvalidError("oturum gecersiz"))
 
-    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+    def _fake_build_dependencies(
+        account_id, session, config_dir, reports_dir, secrets_file, profile_dir
+    ):
         return _FakeDependencies(fake_port)
 
     def _fake_run_account(*args, **kwargs):
@@ -252,7 +260,9 @@ def test_make_on_trigger_writes_a_session_alert_when_revalidation_confirms_sessi
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
     monkeypatch.setattr(main, "run_account", _fake_run_account)
 
-    on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
+    on_trigger = main._make_on_trigger(
+        Path("config"), tmp_path, Path("secrets.json"), Path("browser-profile")
+    )
 
     on_trigger(account_id)  # artik hicbir sey FIRLATMAZ - Failed durum normal donustur
 
@@ -282,7 +292,9 @@ def test_make_on_trigger_does_not_write_a_session_alert_when_failure_is_not_sess
     _, sessions = _patch_db(monkeypatch)
     fake_port = _FakeLinkedInPort(validate_error=None)
 
-    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+    def _fake_build_dependencies(
+        account_id, session, config_dir, reports_dir, secrets_file, profile_dir
+    ):
         return _FakeDependencies(fake_port)
 
     def _fake_run_account(*args, **kwargs):
@@ -295,7 +307,9 @@ def test_make_on_trigger_does_not_write_a_session_alert_when_failure_is_not_sess
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
     monkeypatch.setattr(main, "run_account", _fake_run_account)
 
-    on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
+    on_trigger = main._make_on_trigger(
+        Path("config"), tmp_path, Path("secrets.json"), Path("browser-profile")
+    )
     on_trigger(account_id)
 
     assert not (tmp_path / "NEEDS_LOGIN.txt").exists()
@@ -314,7 +328,9 @@ def test_make_on_trigger_clears_a_previously_written_session_alert_on_success(
     account_id = uuid4()
     _patch_db(monkeypatch)
 
-    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+    def _fake_build_dependencies(
+        account_id, session, config_dir, reports_dir, secrets_file, profile_dir
+    ):
         return "deps"
 
     def _fake_run_account(*args, **kwargs):
@@ -323,7 +339,9 @@ def test_make_on_trigger_clears_a_previously_written_session_alert_on_success(
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
     monkeypatch.setattr(main, "run_account", _fake_run_account)
 
-    on_trigger = main._make_on_trigger(Path("config"), tmp_path, Path("secrets.json"))
+    on_trigger = main._make_on_trigger(
+        Path("config"), tmp_path, Path("secrets.json"), Path("browser-profile")
+    )
 
     on_trigger(account_id)
 
@@ -346,7 +364,9 @@ def test_make_on_trigger_does_not_raise_when_alert_write_fails_after_a_failed_ru
     engines, sessions = _patch_db(monkeypatch)
     fake_port = _FakeLinkedInPort(validate_error=SessionInvalidError("oturum gecersiz"))
 
-    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+    def _fake_build_dependencies(
+        account_id, session, config_dir, reports_dir, secrets_file, profile_dir
+    ):
         return _FakeDependencies(fake_port)
 
     def _fake_run_account(*args, **kwargs):
@@ -357,7 +377,9 @@ def test_make_on_trigger_does_not_raise_when_alert_write_fails_after_a_failed_ru
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
     monkeypatch.setattr(main, "run_account", _fake_run_account)
 
-    on_trigger = main._make_on_trigger(Path("config"), unwritable_reports_dir, Path("secrets.json"))
+    on_trigger = main._make_on_trigger(
+        Path("config"), unwritable_reports_dir, Path("secrets.json"), Path("browser-profile")
+    )
 
     on_trigger(account_id)  # firlatmamali
 
@@ -457,6 +479,7 @@ def test_run_forever_commits_after_initial_schedule_and_after_each_execution(mon
             Path("config"),
             Path("reports"),
             Path("secrets.json"),
+            Path("browser-profile"),
             shutdown_event=shutdown_event,
             register_signal_handlers=False,
         )
@@ -497,6 +520,7 @@ def test_main_reads_account_id_and_path_env_vars_and_delegates_to_run_forever(mo
     monkeypatch.setenv("CONFIG_DIR", "custom-config")
     monkeypatch.setenv("REPORTS_DIR", "custom-reports")
     monkeypatch.setenv("SECRETS_FILE", "custom-secrets.json")
+    monkeypatch.setenv("BROWSER_PROFILE_DIR", "custom-browser-profile")
 
     calls = []
     monkeypatch.setattr(main, "run_forever", lambda *args, **kwargs: calls.append(args))
@@ -509,6 +533,7 @@ def test_main_reads_account_id_and_path_env_vars_and_delegates_to_run_forever(mo
             Path("custom-config"),
             Path("custom-reports"),
             Path("custom-secrets.json"),
+            Path("custom-browser-profile"),
         )
     ]
 
@@ -519,10 +544,13 @@ def test_main_uses_default_paths_when_env_vars_are_unset(monkeypatch):
     monkeypatch.delenv("CONFIG_DIR", raising=False)
     monkeypatch.delenv("REPORTS_DIR", raising=False)
     monkeypatch.delenv("SECRETS_FILE", raising=False)
+    monkeypatch.delenv("BROWSER_PROFILE_DIR", raising=False)
 
     calls = []
     monkeypatch.setattr(main, "run_forever", lambda *args, **kwargs: calls.append(args))
 
     main.main()
 
-    assert calls == [(account_id, Path("config"), Path("reports"), Path("secrets.json"))]
+    assert calls == [
+        (account_id, Path("config"), Path("reports"), Path("secrets.json"), Path("browser-profile"))
+    ]

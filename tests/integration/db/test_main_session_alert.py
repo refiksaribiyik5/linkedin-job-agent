@@ -20,7 +20,6 @@ dolduran uctan uca senaryoyu icerir.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -43,19 +42,7 @@ from linkedinbot.db.repositories.job_repository import SqlAlchemyJobRepository
 from linkedinbot.db.repositories.report_repository import SqlAlchemyReportRepository
 from linkedinbot.db.repositories.run_log_repository import SqlAlchemyRunLogRepository
 from linkedinbot.logging.structured_logger import StructuredLogger
-from linkedinbot.ports.secrets_provider_port import SecretsProviderPort
 from linkedinbot.run.orchestrator import OrchestratorDependencies
-
-
-class _FakeSecretsProvider(SecretsProviderPort):
-    def __init__(self) -> None:
-        self._store: dict[str, str] = {}
-
-    def get(self, key: str) -> str | None:
-        return self._store.get(key)
-
-    def set(self, key: str, value: str) -> None:
-        self._store[key] = value
 
 
 def _seed_account_context(db_session: Session, account_id: UUID) -> None:
@@ -137,12 +124,17 @@ def test_on_trigger_writes_alert_and_durably_persists_expired_status_for_a_live_
     # YAZMALI hem de DB'nin `session_status`'unu KALICI olarak EXPIRED
     # birakmalidir (orchestrator.run()'un kendi rollback'ine RAGMEN).
     account_id = account.account_id
-    secrets_provider = _FakeSecretsProvider()
-    secrets_provider.set("linkedin_storage_state:existing", json.dumps({"cookies": []}))
+    profile_root = tmp_path / "browser-profile"
+    # Faz 13: "kalici bir oturum var" artik bir DB-referans/SecretsProvider
+    # lookup'i DEGIL, bir dosya-sistemi kontroludur (bkz. session_manager.py
+    # modul dokumani) - bu yuzden hesap-bazli profil dizini GERCEKTEN diskte
+    # var olmalidir ki `validate()` canli kontrole (asagidaki basarisiz
+    # checker'a) ULASSIN.
+    (profile_root / str(account_id)).mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.VALID,
             last_validated_at=datetime.now(UTC),
         )
@@ -153,13 +145,15 @@ def test_on_trigger_writes_alert_and_durably_persists_expired_status_for_a_live_
     # halde farkli bir DB baglantisi henuz-commit-edilmemis satirlari GOREMEZ).
     db_session.commit()
 
-    def _fake_build_dependencies(account_id, session, config_dir, reports_dir, secrets_file):
+    def _fake_build_dependencies(
+        account_id, session, config_dir, reports_dir, secrets_file, profile_dir
+    ):
         session_manager = SessionManager(
             session,
-            secrets_provider,
-            lambda: {"cookies": []},
-            lambda storage_state: False,  # canli kontrol BASARISIZ
-            lambda storage_state, location, keywords, page: [],
+            profile_dir,
+            lambda user_data_dir: None,
+            lambda user_data_dir: False,  # canli kontrol BASARISIZ
+            lambda user_data_dir, location, keywords, page: [],
         )
         return OrchestratorDependencies(
             session=session,
@@ -177,7 +171,7 @@ def test_on_trigger_writes_alert_and_durably_persists_expired_status_for_a_live_
 
     monkeypatch.setattr(main, "build_dependencies", _fake_build_dependencies)
 
-    on_trigger = main._make_on_trigger(tmp_path, tmp_path, tmp_path / "secrets.json")
+    on_trigger = main._make_on_trigger(tmp_path, tmp_path, tmp_path / "secrets.json", profile_root)
     on_trigger(account_id)  # firlatmamali - Failed bir calistirma NORMAL doner
 
     alert_path = tmp_path / "NEEDS_LOGIN.txt"

@@ -53,11 +53,16 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import yaml
 from sqlalchemy.orm import Session
 
+from linkedinbot.adapters.linkedin.playwright_client import (
+    LoginTimeoutError,
+    perform_interactive_login,
+)
+from linkedinbot.adapters.linkedin.session_manager import mark_session_valid
 from linkedinbot.bootstrap import LOCK_DURATION, build_dependencies, run_account
 from linkedinbot.config.schema import AccountConfigProfile
 from linkedinbot.config.validator import ConfigValidationError, validate_config
@@ -69,6 +74,7 @@ from linkedinbot.domain.account import Account
 from linkedinbot.domain.run_log import RunLog, RunStatus, TriggerType
 from linkedinbot.domain.user_profile import Preferences, UserProfile
 from linkedinbot.run.orchestrator import RunAlreadyInProgressError
+from linkedinbot.run.run_lock import RunLock
 
 
 def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
@@ -318,7 +324,7 @@ def _report_run_result(result: RunLog) -> int:
 
 
 def _run_run_command(
-    account_id: UUID, config_dir: Path, reports_dir: Path, secrets_file: Path
+    account_id: UUID, config_dir: Path, reports_dir: Path, secrets_file: Path, profile_dir: Path
 ) -> int:
     """`linkedinbot run --account <id>`'in gercek CLI cagrisi (Roadmap M9.7).
 
@@ -343,7 +349,7 @@ def _run_run_command(
     session: Session = session_factory()
     try:
         dependencies = build_dependencies(
-            account_id, session, config_dir, reports_dir, secrets_file
+            account_id, session, config_dir, reports_dir, secrets_file, profile_dir
         )
         result = run_account(
             account_id, dependencies, datetime.now(UTC), LOCK_DURATION, TriggerType.MANUAL
@@ -364,6 +370,110 @@ def _run_run_command(
         engine.dispose()
 
     return _report_run_result(result)
+
+
+# ---------------------------------------------------------------------------
+# `login` (Faz 13, persistent Chromium profili mimarisi). Onceki turlerde
+# onaylanan tasarim: `docker compose exec app linkedinbot login --account
+# <id>` ile, Commit 1'de hazirlanan Xvfb/x11vnc/noVNC altyapisini kullanarak,
+# ZATEN CALISAN `app` konteyneri ICINDE calistirilmak uzere tasarlanmistir -
+# ana surecin (main.py, APScheduler dongusu) PID 1 olarak calismaya devam
+# etmesine hicbir sekilde dokunmaz (bkz. entrypoint.sh'in kendi dokumani).
+# ---------------------------------------------------------------------------
+
+
+def _run_login_command(account_id: UUID, profile_dir: Path) -> int:
+    """`linkedinbot login --account <id>`'in gercek CLI cagrisi.
+
+    `RunLock`'un KENDISI DEGISTIRILMEDEN, `orchestrator.run()`'un KENDI
+    kullanim deseniyle (bkz. orchestrator.py) AYNI sekilde yeniden
+    kullanilir - kendi `lock_owner`'i (`login-{uuid4()}`, ayirt edici
+    bir onek ile) ve AYNI `bootstrap.LOCK_DURATION` (yeni bir sabit ICAT
+    EDILMEZ) ile. Bu, bir scheduled/manuel pipeline calistirmasinin (KENDI
+    RunLock kullanimi zaten var, orchestrator.py degismedi) bu login
+    akisiyla AYNI hesabin kalici Chromium profilini ES ZAMANLI acmaya
+    calismasini, Chromium'un kendi SingletonLock'undan ONCE, uygulama
+    seviyesinde engeller (bkz. session_manager.py/playwright_client.py
+    "Mimari degisiklik" notlari - ayni profili iki ayri Chromium process'inin
+    ES ZAMANLI acmasi RunLock olmadan mumkun olurdu).
+
+    Kilit alinamazsa (baska bir pipeline calistirmasi surerken) HICBIR
+    tarayici/Xvfb kaynagi ACILMADAN acik bir mesajla (kullanicidan acikca
+    istenen, sabit Ingilizce metin) 1 doner - "hicbir is denenmedi"
+    senaryosu, `orchestrator.run()`'un KENDI RunLock-mesgul davranisiyla
+    (RunAlreadyInProgressError) AYNI ilkeyi izler.
+
+    Hesap dogrulamasi (`SqlAlchemyAccountRepository.get_by_id()`) `RunLock.
+    acquire()`'dan ONCE yapilir - `orchestrator.run()`'un KENDI, `run_locks.
+    account_id`'nin `accounts.account_id`'ye FK tasidigi icin ZORUNLU
+    kildigi AYNI sirayla (bkz. orchestrator.py'nin kendi "Duzeltme notu") -
+    var olmayan bir hesap icin `run_locks`'a HICBIR ZAMAN dokunulmaz.
+
+    `mark_session_valid()` (session_manager.py) YALNIZCA `perform_interactive
+    _login()` HICBIR istisna firlatmadan donerse cagrilir - basarisiz bir
+    giris (`LoginTimeoutError` DAHIL) `linkedin_sessions`'a ASLA `VALID`
+    yazmaz (bkz. asagidaki inner try/except'in `return 1` yolu). Bu cagri
+    ikinci bir RunLock/SessionManager INSA ETMEZ - zaten acik olan `session`
+    ve zaten tutulan kilit kapsami ICINDE calisir. Bu metodun sorumlulugu
+    SADECE "interaktif giris basariyla tamamlandi, kalici profil hazir"
+    bilgisini kaydetmektir - LinkedIn'in bu profili GERCEKTEN kabul edip
+    etmedigini (canli kontrol) SORMAZ/İDDİA ETMEZ; bu, `SessionManager.
+    validate()`'in (Session Validation, pipeline'in ilk adimi) AYRI
+    sorumlulugudur (bkz. mark_session_valid()'in kendi dokumani).
+    """
+    engine = create_db_engine()
+    session_factory = create_session_factory(engine)
+    session: Session = session_factory()
+    lock_owner = f"login-{uuid4()}"
+    run_lock = RunLock(session)
+    lock_acquired = False
+    try:
+        account = SqlAlchemyAccountRepository(session).get_by_id(account_id)
+        if account is None:
+            print(f"Hesap bulunamadi: {account_id}", file=sys.stderr)
+            return 1
+
+        now = datetime.now(UTC)
+        lock_acquired = run_lock.acquire(account_id, lock_owner, now, LOCK_DURATION)
+        if not lock_acquired:
+            print(
+                "Account currently has an active pipeline run; login cannot start.",
+                file=sys.stderr,
+            )
+            return 1
+        session.commit()
+
+        account_profile_dir = profile_dir / str(account_id)
+        try:
+            perform_interactive_login(account_profile_dir)
+        except LoginTimeoutError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
+        # Faz 13 regresyon duzeltmesi (adversarial review'da bulunan blocker):
+        # basarili interaktif giris SONRASI, `ensure_session()`'in KENDI
+        # kullandigi AYNI DB-yazma yolu (`mark_session_valid()`, session_
+        # manager.py) burada da cagrilir - aksi halde hic `linkedin_sessions`
+        # satiri olmayan bir hesap icin (orn. ilk giris) `validate()`'in
+        # "existing is None -> SessionInvalidError" guvenlik agi, GERCEKTEN
+        # gecerli olan bu profili canli kontrol ETMEDEN reddederdi (M10.2'nin
+        # duzelttigi kalici kilitlenme sinifinin farkli bir kod yolundan
+        # geri gelmesi). Ikinci bir RunLock/SessionManager INSA EDILMEZ - bu
+        # cagri, `_run_login_command()`'in KENDI (yukarida zaten alinmis)
+        # RunLock kapsami ICINDE, AYNI `session` uzerinden yapilir.
+        mark_session_valid(session, account_id)
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        if lock_acquired:
+            run_lock.release(account_id, lock_owner)
+            session.commit()
+        session.close()
+        engine.dispose()
+
+    print(f"Login basarili: account_id={account_id}, profile_dir={account_profile_dir}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -429,6 +539,39 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("secrets.json"),
         help="Sifreli secrets deposu dosyasi (varsayilan: ./secrets.json).",
     )
+    run_parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        default=Path("browser-profile"),
+        help=(
+            "Kalici Chromium profillerinin (hesap-bazli alt-dizinler) "
+            "kok dizini (varsayilan: ./browser-profile)."
+        ),
+    )
+
+    login_parser = subparsers.add_parser(
+        "login",
+        help=(
+            "Bir hesap icin interaktif LinkedIn girisini tetikler; kalici "
+            "Chromium profilini olusturur/gunceller (Faz 13)."
+        ),
+    )
+    login_parser.add_argument(
+        "--account",
+        type=UUID,
+        required=True,
+        dest="account_id",
+        help="Giris yapilacak hesabin account_id'si (zorunlu).",
+    )
+    login_parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        default=Path("browser-profile"),
+        help=(
+            "Kalici Chromium profillerinin (hesap-bazli alt-dizinler) "
+            "kok dizini (varsayilan: ./browser-profile)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -439,8 +582,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_config_validate_command(args.config_dir)
     if args.command == "run":
         return _run_run_command(
-            args.account_id, args.config_dir, args.reports_dir, args.secrets_file
+            args.account_id, args.config_dir, args.reports_dir, args.secrets_file, args.profile_dir
         )
+    if args.command == "login":
+        return _run_login_command(args.account_id, args.profile_dir)
 
     return 0
 

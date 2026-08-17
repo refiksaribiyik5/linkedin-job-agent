@@ -1,21 +1,33 @@
-"""SessionManager icin entegrasyon testleri (Roadmap M3.1 + M3.2).
+"""SessionManager icin entegrasyon testleri (Roadmap M3.1 + M3.2; Faz 13:
+storage_state snapshot -> persistent Chromium profili mimari gecisi).
 
 Roadmap M3.1 "Beklenen Sonuc": "Bir kez interaktif giris yapildiktan
-sonra oturum storage_state olarak Secrets Provider uzerinden saklanir;
-surec yeniden baslatildiginda kimlik bilgisi tekrar istenmez." Roadmap
-M3.2 "Beklenen Sonuc": "Gecersiz oturum SessionInvalidError firlatir;
-genel bir crash degil, tanimli bir hata turudur." Asagidaki testler bu
-davranislari (1) gercek bir DB satiri (`linkedin_sessions`) uzerinden ve
-(2) sahte (in-memory) bir SecretsProvider + sahte "interaktif giris"/
-"oturum gecerlilik kontrolu" callable'lari uzerinden dogrular - gercek
+sonra oturum kalici hale getirilir; surec yeniden baslatildiginda kimlik
+bilgisi tekrar istenmez." Roadmap M3.2 "Beklenen Sonuc": "Gecersiz oturum
+SessionInvalidError firlatir; genel bir crash degil, tanimli bir hata
+turudur." Asagidaki testler bu davranislari (1) gercek bir DB satiri
+(`linkedin_sessions`) uzerinden ve (2) sahte (in-memory) "interaktif
+giris"/"oturum gecerlilik kontrolu" callable'lari + `tmp_path` altinda
+disposable, GERCEK-OLMAYAN profil dizinleri uzerinden dogrular - gercek
 Playwright'a bu dosyada hic dokunulmaz (bkz. test_playwright_client.py,
 tarayici tarafi zaten ayri test edildi).
-"""
+
+**Faz 13 mimari degisikligi (bu dosyanin kendisi icin onemli):**
+`SessionManager` artik bir `SecretsProviderPort` almaz - kalici oturumun
+KENDISI, hesap-bazli bir DIZIN (`profile_root/<account_id>/`) olarak
+temsil edilir. "Kalici bir oturum var mi" sorusu artik bir DB-referans/
+Secrets-Provider lookup'i DEGIL, dogrudan bir dosya-sistemi kontrolu
+(`profile_dir.exists()`) ile cevaplanir. Bu yuzden bu dosyadaki sahte
+callable'lar artik `dict` (storage_state) DEGIL, `Path` (profil dizini)
+alir/doner - ONCEKI `_FakeSecretsProvider`/`json.dumps(...)` mekanizmasi
+TAMAMEN kaldirildi (artik test edilecek bir sey yok - encrypted_storage_
+state_ref DB sutunu KASITLI OLARAK legacy/kullanilmayan birakildi, bkz.
+session_manager.py modul dokumani)."""
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session
@@ -23,34 +35,24 @@ from sqlalchemy.orm import Session
 from linkedinbot.adapters.linkedin.session_manager import SessionManager
 from linkedinbot.db.models import AccountOrm, LinkedInSessionOrm, SessionStatus
 from linkedinbot.ports.linkedin_port import LinkedInPort, SessionInvalidError
-from linkedinbot.ports.secrets_provider_port import SecretsProviderPort
-
-FAKE_STORAGE_STATE = {"cookies": [{"name": "li_at", "value": "fake-session-token"}]}
-
-
-class _FakeSecretsProvider(SecretsProviderPort):
-    def __init__(self):
-        self._store: dict[str, str] = {}
-
-    def get(self, key: str) -> str | None:
-        return self._store.get(key)
-
-    def set(self, key: str, value: str) -> None:
-        self._store[key] = value
 
 
 @pytest.fixture
-def secrets_provider() -> _FakeSecretsProvider:
-    return _FakeSecretsProvider()
+def profile_root(tmp_path: Path) -> Path:
+    return tmp_path / "browser-profile"
 
 
 @pytest.fixture
 def playwright_login():
-    calls = []
+    calls: list[Path] = []
 
-    def _login():
-        calls.append(1)
-        return FAKE_STORAGE_STATE
+    def _login(user_data_dir: Path) -> None:
+        calls.append(user_data_dir)
+        # Gercek `perform_interactive_login()`'in kalici profili DISKE
+        # YAZMASININ sahte karsiligi - `validate()`'in sonraki
+        # `profile_dir.exists()` kontrolunun basarili GECEBILMESI icin
+        # gereklidir (gercek Chromium burada YOKTUR).
+        user_data_dir.mkdir(parents=True, exist_ok=True)
 
     _login.calls = calls
     return _login
@@ -58,11 +60,11 @@ def playwright_login():
 
 @pytest.fixture
 def session_validity_checker():
-    calls: list[dict] = []
+    calls: list[Path] = []
     state = {"return_value": True}
 
-    def _check(storage_state: dict) -> bool:
-        calls.append(storage_state)
+    def _check(user_data_dir: Path) -> bool:
+        calls.append(user_data_dir)
         return state["return_value"]
 
     _check.calls = calls
@@ -75,8 +77,8 @@ def search_page():
     calls: list[tuple] = []
     state = {"return_value": []}
 
-    def _search(storage_state: dict, location: str, keywords: str, page: int) -> list[str]:
-        calls.append((storage_state, location, keywords, page))
+    def _search(user_data_dir: Path, location: str, keywords: str, page: int) -> list[str]:
+        calls.append((user_data_dir, location, keywords, page))
         return state["return_value"]
 
     _search.calls = calls
@@ -87,13 +89,13 @@ def search_page():
 @pytest.fixture
 def session_manager(
     db_session: Session,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
     playwright_login,
     session_validity_checker,
     search_page,
 ) -> SessionManager:
     return SessionManager(
-        db_session, secrets_provider, playwright_login, session_validity_checker, search_page
+        db_session, profile_root, playwright_login, session_validity_checker, search_page
     )
 
 
@@ -101,44 +103,66 @@ def test_session_manager_implements_linkedin_port(session_manager: SessionManage
     assert isinstance(session_manager, LinkedInPort)
 
 
+def test_profile_dir_is_account_scoped(profile_root: Path, session_manager: SessionManager):
+    # (Faz 13, madde 3 "Account Scoping"): iki farkli account_id ASLA ayni
+    # dizini paylasamaz - gelecekte ikinci bir hesap eklense bile profil
+    # cakismasi olusmamalidir (bkz. session_manager.py modul dokumaninin
+    # "account_id parametresi olmadan hicbir Account-Scoped sorgu
+    # calismaz" notu).
+    from uuid import uuid4
+
+    account_id_1 = uuid4()
+    account_id_2 = uuid4()
+
+    dir_1 = session_manager._profile_dir(account_id_1)
+    dir_2 = session_manager._profile_dir(account_id_2)
+
+    assert dir_1 != dir_2
+    assert dir_1 == profile_root / str(account_id_1)
+    assert dir_2 == profile_root / str(account_id_2)
+    assert dir_1.parent == profile_root
+    assert dir_2.parent == profile_root
+
+
 def test_ensure_session_performs_login_when_no_existing_session(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
+    profile_root: Path,
     playwright_login,
-    secrets_provider: _FakeSecretsProvider,
 ):
     session_manager.ensure_session(account.account_id)
 
-    assert len(playwright_login.calls) == 1
+    expected_dir = profile_root / str(account.account_id)
+    assert playwright_login.calls == [expected_dir]
+    assert expected_dir.exists()
 
     row = db_session.get(LinkedInSessionOrm, account.account_id)
     assert row is not None
     assert row.session_status == SessionStatus.VALID
     assert row.last_validated_at is not None
-    assert row.encrypted_storage_state_ref is not None
-
-    persisted = secrets_provider.get(row.encrypted_storage_state_ref)
-    assert json.loads(persisted) == FAKE_STORAGE_STATE
+    # `encrypted_storage_state_ref` artik KASITLI OLARAK YAZILMAZ (legacy/
+    # kullanilmayan alan, bkz. session_manager.py modul dokumani).
+    assert row.encrypted_storage_state_ref is None
 
 
 def test_ensure_session_skips_login_when_session_already_persisted_and_valid(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
     playwright_login,
     session_validity_checker,
 ):
-    # M10.2 duzeltmesi: "zaten bir referans var" TEK BASINA yeterli DEGILDIR
-    # (bkz. ensure_session()'in kendi dokumani) - referansin GERCEKTEN
-    # cozulebilir VE canli olarak GECERLI olmasi gerekir. Bu yuzden burada
-    # (eski testin aksine) secrets_provider'a GERCEKTEN bir deger yazilir.
-    secrets_provider.set("linkedin_storage_state:already-there", json.dumps(FAKE_STORAGE_STATE))
+    # M10.2 duzeltmesi: "profil dizini var" TEK BASINA yeterli DEGILDIR
+    # (bkz. ensure_session()'in kendi dokumani) - GERCEKTEN canli olarak
+    # GECERLI olmasi gerekir.
+    expected_dir = profile_root / str(account.account_id)
+    expected_dir.mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:already-there",
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.VALID,
             last_validated_at=datetime.now(UTC),
         )
@@ -153,14 +177,14 @@ def test_ensure_session_skips_login_when_session_already_persisted_and_valid(
     # bu, GERCEKTEN canli olarak dogrulanmis bir gecerlilige dayanmalidir -
     # checker'in cagirildigi da acikca dogrulanir.
     assert playwright_login.calls == []
-    assert session_validity_checker.calls == [FAKE_STORAGE_STATE]
+    assert session_validity_checker.calls == [expected_dir]
 
 
 def test_ensure_session_launches_login_when_session_marked_expired(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
     playwright_login,
     session_validity_checker,
 ):
@@ -169,11 +193,12 @@ def test_ensure_session_launches_login_when_session_marked_expired(
     # `session_status=EXPIRED` ONCEDEN bilindigi icin `validate()`'in
     # canli kontrolu HIC CAGRILMAZ (gereksiz bir ag istegi) - dogrudan
     # interaktif girise gecilir.
-    secrets_provider.set("linkedin_storage_state:stale", json.dumps(FAKE_STORAGE_STATE))
+    expected_dir = profile_root / str(account.account_id)
+    expected_dir.mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:stale",
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.EXPIRED,
             last_validated_at=datetime.now(UTC),
         )
@@ -182,34 +207,32 @@ def test_ensure_session_launches_login_when_session_marked_expired(
 
     session_manager.ensure_session(account.account_id)
 
-    assert len(playwright_login.calls) == 1
+    assert playwright_login.calls == [expected_dir]
     # Zaten EXPIRED oldugu BILINEN bir oturum icin gereksiz bir canli
     # kontrol YAPILMAMALIDIR - verimlilik icin kasitli bir kisayol.
     assert session_validity_checker.calls == []
     row = db_session.get(LinkedInSessionOrm, account.account_id)
     assert row.session_status == SessionStatus.VALID
-    assert json.loads(secrets_provider.get(row.encrypted_storage_state_ref)) == FAKE_STORAGE_STATE
 
 
 def test_ensure_session_launches_login_and_replaces_session_when_validation_fails(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
     playwright_login,
     session_validity_checker,
 ):
     # M10.2 duzeltmesi - `session_status` DB'de HALA `VALID` yaziyor olsa
     # bile (orn. LinkedIn oturumu son dogrulamadan SONRA, DB HENUZ
-    # HABERDAR OLMADAN reddetmis olabilir - bu duzeltmenin dogrudan
-    # kanitladigi GERCEK senaryo), `validate()`'in canli kontrolu bunu
-    # YAKALAR ve interaktif girise gecer.
-    old_ref = "linkedin_storage_state:old-and-rejected"
-    secrets_provider.set(old_ref, json.dumps({"cookies": [{"name": "li_at", "value": "stale"}]}))
+    # HABERDAR OLMADAN reddetmis olabilir), `validate()`'in canli kontrolu
+    # bunu YAKALAR ve interaktif girise gecer.
+    expected_dir = profile_root / str(account.account_id)
+    expected_dir.mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
-            encrypted_storage_state_ref=old_ref,
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.VALID,
             last_validated_at=datetime.now(UTC),
         )
@@ -219,30 +242,26 @@ def test_ensure_session_launches_login_and_replaces_session_when_validation_fail
 
     session_manager.ensure_session(account.account_id)
 
-    assert len(playwright_login.calls) == 1
+    assert playwright_login.calls == [expected_dir]
     # Canli kontrol GERCEKTEN denendi (kisayol degil, M10.2'nin asil
     # kanitladigi senaryo).
-    assert session_validity_checker.calls == [{"cookies": [{"name": "li_at", "value": "stale"}]}]
+    assert session_validity_checker.calls == [expected_dir]
     row = db_session.get(LinkedInSessionOrm, account.account_id)
     assert row.session_status == SessionStatus.VALID
-    assert row.encrypted_storage_state_ref is not None
-    # Eski referans DEGIL, YENI girisin urettigi storage_state saklanmis
-    # olmalidir - "degistirilir" gereksiniminin somut kaniti.
-    assert json.loads(secrets_provider.get(row.encrypted_storage_state_ref)) == FAKE_STORAGE_STATE
 
 
-def test_ensure_session_updates_placeholder_row_missing_a_session_ref(
+def test_ensure_session_updates_placeholder_row_missing_a_profile(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
+    profile_root: Path,
     playwright_login,
-    secrets_provider: _FakeSecretsProvider,
 ):
-    # `encrypted_storage_state_ref` nullable'dir (bkz. db/models.py) - bir
-    # hesap olusturulup ilk giris yapilmasi arasinda boyle bir "yer
-    # tutucu" satir teorik olarak var olabilir. Bu durumda M3.1 hala
-    # giris yapip AYNI satiri guncellemelidir (yeni bir satir eklemeye
-    # calisip PK ihlali uretmemelidir).
+    # Bir hesap olusturulup ilk giris yapilmasi arasinda boyle bir "yer
+    # tutucu" satir teorik olarak var olabilir (profil dizini DISKTE
+    # HENUZ YOK). Bu durumda M3.1 hala giris yapip AYNI satiri
+    # guncellemelidir (yeni bir satir eklemeye calisip PK ihlali
+    # uretmemelidir).
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
@@ -255,71 +274,55 @@ def test_ensure_session_updates_placeholder_row_missing_a_session_ref(
 
     session_manager.ensure_session(account.account_id)
 
-    assert len(playwright_login.calls) == 1
+    expected_dir = profile_root / str(account.account_id)
+    assert playwright_login.calls == [expected_dir]
     row = db_session.get(LinkedInSessionOrm, account.account_id)
     assert row.session_status == SessionStatus.VALID
-    assert row.encrypted_storage_state_ref is not None
-    assert json.loads(secrets_provider.get(row.encrypted_storage_state_ref)) == FAKE_STORAGE_STATE
 
 
-def test_ensure_session_leaves_no_partial_state_when_login_fails(
+def test_ensure_session_leaves_no_partial_db_state_when_login_fails(
     db_session: Session,
     account: AccountOrm,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
     session_validity_checker,
     search_page,
 ):
-    # Ic-denetimde dogrulanmasi gereken bir davranis (kodun kendisi zaten
-    # dogru sirayla yaziliyor, ama bu oncesinde otomatik bir test yoktu):
-    # giris basarisiz olursa (orn. LoginTimeoutError - kullanici 2FA'yi
-    # tamamlamadan vazgecti), NE bir DB satiri NE de bir secret
-    # yazilmamalidir - basarisiz bir girisin yarim/tutarsiz bir "oturum
-    # var" izlenimi birakmasi, sonraki bir calistirmanin gecersiz/eksik
-    # bir referansla calismaya calismasina yol acardi.
-    def _failing_login():
+    # Giris basarisiz olursa (orn. LoginTimeoutError - kullanici 2FA'yi
+    # tamamlamadan vazgecti), hicbir DB satiri yazilmamalidir - basarisiz
+    # bir girisin yarim/tutarsiz bir "oturum var" izlenimi birakmasi,
+    # sonraki bir calistirmanin gecersiz/eksik bir profille calismaya
+    # calismasina yol acardi.
+    def _failing_login(user_data_dir: Path) -> None:
         raise RuntimeError("kullanici 2FA'yi tamamlamadan vazgecti")
 
     manager = SessionManager(
-        db_session, secrets_provider, _failing_login, session_validity_checker, search_page
+        db_session, profile_root, _failing_login, session_validity_checker, search_page
     )
 
     with pytest.raises(RuntimeError, match="2FA"):
         manager.ensure_session(account.account_id)
 
     assert db_session.get(LinkedInSessionOrm, account.account_id) is None
-    assert secrets_provider._store == {}
 
 
-def test_ensure_session_does_not_write_secret_if_db_write_fails(
+def test_ensure_session_propagates_db_flush_failure_without_partial_commit(
     db_session: Session,
     account: AccountOrm,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
     playwright_login,
     session_validity_checker,
     search_page,
     monkeypatch,
 ):
-    # Bagimsiz incelemede bulunan Major bulgu: DB yazimi (flush) ile
-    # Secrets Provider yazimi birbirinden bagimsiz iki kalicilik
-    # mekanizmasidir - hicbir ortak transaction'lari yoktur. Eger secret
-    # ONCE yazilirsa ve DB flush'i SONRA basarisiz olursa, kullanicinin
-    # tamamladigi pahali bir interaktif giris (2FA/CAPTCHA dahil) bosa
-    # gitmis olur: disk uzerinde hicbir DB satirinin referans vermedigi,
-    # "yetim" bir secret kalir. Duzeltme: DB yazimi (flush) SIRAYLA ONCE
-    # yapilir; yalnizca basarili olursa secret yazilir - boylece DB
-    # basarisizligi secret yazimindan ONCE gerceklesir, hicbir yetim
-    # secret asla olusmaz.
+    # Faz 13'te SecretsProvider kaldirildigi icin ("hangi sistem ONCE
+    # yazilmali" sirasi - eski Major bulgu) artik geçerli bir senaryo
+    # DEGIL: tek kalicilik mekanizmasi DB'nin kendisidir. Burada yalnizca
+    # `flush()` basarisiz olursa hatanin duzgunce yukari sizdigi VE hicbir
+    # yarim satirin commit EDILMEDIGI dogrulanir.
     manager = SessionManager(
-        db_session, secrets_provider, playwright_login, session_validity_checker, search_page
+        db_session, profile_root, playwright_login, session_validity_checker, search_page
     )
 
-    # NOT: `session.get(...)` kendi ici SQLAlchemy autoflush'i tetikler -
-    # bu, bekleyen HICBIR degisiklik olmadiginda bile `flush()`'i cagirir
-    # (zararsiz bir no-op olarak). Kosulsuz bir "her zaman patla" sahte
-    # flush, bu zararsiz autoflush cagrisini da yakalayip testi YANLIS
-    # noktada (henuz playwright_login/secrets.set'e hic ulasmadan)
-    # patlatirdi - bu yuzden yalnizca GERCEKTEN bekleyen (yeni/degismis)
-    # nesne varken basarisiz olan bir sarmalayici kullanilir.
     original_flush = db_session.flush
 
     def _failing_flush(*args, **kwargs):
@@ -332,50 +335,8 @@ def test_ensure_session_does_not_write_secret_if_db_write_fails(
     with pytest.raises(RuntimeError, match="simulated db failure"):
         manager.ensure_session(account.account_id)
 
-    assert secrets_provider._store == {}
-
-
-def test_ensure_session_db_row_is_cleanly_rollback_recoverable_if_secret_write_fails(
-    db_session: Session,
-    account: AccountOrm,
-    playwright_login,
-    session_validity_checker,
-    search_page,
-):
-    # Ayni bulgunun diger yarisi: DB yazimi ONCE gerceklestigi icin,
-    # SONRASINDA secret yazimi basarisiz olursa (orn. disk dolu), cagiran
-    # (established `cli.seed()`/`_run_seed_command` konvansiyonuyla
-    # tutarli sekilde) transaction'i geri alabilir (rollback) ve hicbir
-    # tutarsiz/yarim durum kalmaz - ne "DB'de var ama secret'i yok" bir
-    # satir, ne de bir yetim secret.
-    # `account.account_id` rollback ONCESINDE yakalanir: `db_session.rollback()`
-    # bu session'daki TUM nesneleri (henuz commit edilmemis `account` dahil)
-    # expire eder; rollback SONRASI `account.account_id`'ye tekrar erismeye
-    # calismak, artik var olmayan satiri yeniden yuklemeye calisip
-    # `ObjectDeletedError` firlatirdi.
-    account_id = account.account_id
-
-    class _FailingSecretsProvider(SecretsProviderPort):
-        def get(self, key: str) -> str | None:
-            return None
-
-        def set(self, key: str, value: str) -> None:
-            raise RuntimeError("disk full")
-
-    manager = SessionManager(
-        db_session,
-        _FailingSecretsProvider(),
-        playwright_login,
-        session_validity_checker,
-        search_page,
-    )
-
-    with pytest.raises(RuntimeError, match="disk full"):
-        manager.ensure_session(account_id)
-
     db_session.rollback()
-
-    assert db_session.get(LinkedInSessionOrm, account_id) is None
+    assert db_session.get(LinkedInSessionOrm, account.account_id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -399,12 +360,17 @@ def test_validate_raises_session_invalid_error_when_no_session_exists(
     assert session_validity_checker.calls == []
 
 
-def test_validate_raises_session_invalid_error_when_ref_is_null(
+def test_validate_raises_session_invalid_error_when_profile_dir_missing(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
     session_validity_checker,
 ):
+    # DB satiri VAR ama profil dizini DISKTE YOK (orn. hic giris
+    # yapilmamis bir "yer tutucu" satir, ya da profil manuel/kazayla
+    # silinmis - bkz. Faz 13 recovery tasarimi). "profil mevcut mu"
+    # kontrolu DB'nin kendi durumundan BAGIMSIZ olarak dosya sisteminden
+    # yapilir.
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
@@ -421,43 +387,19 @@ def test_validate_raises_session_invalid_error_when_ref_is_null(
     assert session_validity_checker.calls == []
 
 
-def test_validate_raises_session_invalid_error_when_secret_missing_for_ref(
+def test_validate_passes_profile_dir_to_checker_and_succeeds_when_valid(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
+    profile_root: Path,
     session_validity_checker,
 ):
-    # Veri butunlugu tutarsizligi (normal kullanimda olusmamasi gereken,
-    # ama savunmaci sekilde ele alinmasi gereken bir durum): DB'de bir
-    # referans var ama Secrets Provider'da karsilik gelen bir deger yok.
+    expected_dir = profile_root / str(account.account_id)
+    expected_dir.mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:missing",
-            session_status=SessionStatus.VALID,
-            last_validated_at=datetime.now(UTC),
-        )
-    )
-    db_session.flush()
-
-    with pytest.raises(SessionInvalidError):
-        session_manager.validate(account.account_id)
-
-    assert session_validity_checker.calls == []
-
-
-def test_validate_passes_stored_storage_state_to_checker_and_succeeds_when_valid(
-    db_session: Session,
-    account: AccountOrm,
-    session_manager: SessionManager,
-    secrets_provider: _FakeSecretsProvider,
-    session_validity_checker,
-):
-    secrets_provider.set("linkedin_storage_state:existing", json.dumps(FAKE_STORAGE_STATE))
-    db_session.add(
-        LinkedInSessionOrm(
-            account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.UNKNOWN,
             last_validated_at=None,
         )
@@ -467,7 +409,7 @@ def test_validate_passes_stored_storage_state_to_checker_and_succeeds_when_valid
 
     session_manager.validate(account.account_id)  # herhangi bir exception firlatmamali
 
-    assert session_validity_checker.calls == [FAKE_STORAGE_STATE]
+    assert session_validity_checker.calls == [expected_dir]
     row = db_session.get(LinkedInSessionOrm, account.account_id)
     assert row.session_status == SessionStatus.VALID
     assert row.last_validated_at is not None
@@ -477,19 +419,19 @@ def test_validate_raises_and_marks_expired_when_checker_reports_invalid(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
     session_validity_checker,
 ):
     # Roadmap M3.2 "Tamamlanma Dogrulamasi"nin canli davranis karsiligi:
-    # kayitli oturum gecersizlestirilmis (orn. bir cerez silinmis) gibi
-    # davranan bir checker - dogru hata turu firlatilmali VE DB'nin
-    # session_status'u EXPIRED olarak guncellenmelidir (bu alanlarin
-    # TDD Section 15'teki tam da bu amac icin var oldugu sema).
-    secrets_provider.set("linkedin_storage_state:existing", json.dumps(FAKE_STORAGE_STATE))
+    # kayitli oturum gecersizlestirilmis (orn. LinkedIn cerezi sunucu
+    # tarafinda sildi) gibi davranan bir checker - dogru hata turu
+    # firlatilmali VE DB'nin session_status'u EXPIRED olarak
+    # guncellenmelidir.
+    (profile_root / str(account.account_id)).mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.VALID,
             last_validated_at=datetime.now(UTC),
         )
@@ -509,7 +451,7 @@ def test_validate_does_not_reclassify_checker_errors_as_session_invalid(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
 ):
     # Onemli ayrim (TDD Section 20: TransientError vs PermanentError): bir
     # ag/navigasyon hatasi (checker'in RuntimeError firlatmasi) "oturum
@@ -517,18 +459,18 @@ def test_validate_does_not_reclassify_checker_errors_as_session_invalid(
     # cevirmemeli/yutmamali VE satirin session_status'unu (yalnizca
     # checker GERCEKTEN False donduğunde EXPIRED'a cekilmesi gereken bir
     # alani) bir ag hatasi yuzunden yanlislikla degistirmemelidir.
-    secrets_provider.set("linkedin_storage_state:existing", json.dumps(FAKE_STORAGE_STATE))
+    (profile_root / str(account.account_id)).mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.VALID,
             last_validated_at=datetime.now(UTC),
         )
     )
     db_session.flush()
 
-    def _raising_checker(storage_state):
+    def _raising_checker(user_data_dir: Path):
         raise RuntimeError("simulated network failure")
 
     session_manager._session_validity_checker = _raising_checker
@@ -547,12 +489,11 @@ def test_validate_detects_manual_invalidation_of_a_previously_valid_session(
     session_validity_checker,
 ):
     # Roadmap M3.2 "Tamamlanma Dogrulamasi"nin tam metni: "Kayitli oturumu
-    # manuel olarak gecersizlestirip (orn. cerezi silerek) dogrulamayi
-    # tekrar calistir; dogru hata turunun firlatildigini dogrula." Once
-    # gercek bir giris (ensure_session) yapilir, dogrulama basarili olur;
-    # sonra oturum "gecersizlestirilir" (checker'in donus degeri degisir,
-    # cerez silme'nin canli davranis karsiligi) ve validate() TEKRAR
-    # calistirilir.
+    # manuel olarak gecersizlestirip dogrulamayi tekrar calistir; dogru
+    # hata turunun firlatildigini dogrula." Once gercek bir giris
+    # (ensure_session) yapilir, dogrulama basarili olur; sonra oturum
+    # "gecersizlestirilir" (checker'in donus degeri degisir) ve validate()
+    # TEKRAR calistirilir.
     session_manager.ensure_session(account.account_id)
     session_manager.validate(account.account_id)  # baslangicta hala gecerli
 
@@ -569,8 +510,6 @@ def test_validate_detects_manual_invalidation_of_a_previously_valid_session(
 # search_jobs_page (Roadmap M3.3, FR-21) - `LinkedInPort`'un yeni soyut
 # metodu: verilen (location, keywords, page) sorgusu icin, hesabin kalici
 # oturumunu kullanarak TEK bir sayfalik ham ilan karti dizisini doner.
-# `collection/collector.py`'nin (M3.3) `linkedin_port`'a bagimli olmasi
-# gerektigi kararinin (proje talimatiyla acikca onaylandi) somut karsiligi.
 # ---------------------------------------------------------------------------
 
 
@@ -585,7 +524,7 @@ def test_search_jobs_page_raises_session_invalid_error_when_no_session_exists(
     assert search_page.calls == []
 
 
-def test_search_jobs_page_raises_session_invalid_error_when_ref_is_null(
+def test_search_jobs_page_raises_session_invalid_error_when_profile_dir_missing(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
@@ -611,21 +550,21 @@ def test_search_jobs_page_raises_session_invalid_error_when_session_marked_expir
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
     search_page,
 ):
     # Bagimsiz incelemede bulunan bulgu: bir onceki validate() (M3.2)
     # cagrisi bu oturumu ZATEN EXPIRED olarak isaretlemis olabilir (bkz.
-    # SessionManager.validate()). search_jobs_page() yalnizca referansin
+    # SessionManager.validate()). search_jobs_page() yalnizca profilin
     # VAR olup olmadigina bakip session_status'u yok sayarsa, ARTIK
     # GECERSIZ oldugu BILINEN bir oturumla gereksiz yere LinkedIn'e
     # istek atmaya calisir - bu, "session consistency" acisindan gercek
-    # bir tutarsizliktir: DB'nin kendi durumu yok sayilir.
-    secrets_provider.set("linkedin_storage_state:existing", json.dumps(FAKE_STORAGE_STATE))
+    # bir tutarsizliktir: DB'nin kendi durumu yok sayilmamalidir.
+    (profile_root / str(account.account_id)).mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.EXPIRED,
             last_validated_at=datetime.now(UTC),
         )
@@ -638,40 +577,19 @@ def test_search_jobs_page_raises_session_invalid_error_when_session_marked_expir
     assert search_page.calls == []
 
 
-def test_search_jobs_page_raises_session_invalid_error_when_secret_missing_for_ref(
+def test_search_jobs_page_delegates_to_injected_callable_with_profile_dir(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
+    profile_root: Path,
     search_page,
 ):
+    expected_dir = profile_root / str(account.account_id)
+    expected_dir.mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:missing",
-            session_status=SessionStatus.VALID,
-            last_validated_at=datetime.now(UTC),
-        )
-    )
-    db_session.flush()
-
-    with pytest.raises(SessionInvalidError):
-        session_manager.search_jobs_page(account.account_id, "Istanbul", '"Sales"', 0)
-
-    assert search_page.calls == []
-
-
-def test_search_jobs_page_delegates_to_injected_callable_with_stored_storage_state(
-    db_session: Session,
-    account: AccountOrm,
-    session_manager: SessionManager,
-    secrets_provider: _FakeSecretsProvider,
-    search_page,
-):
-    secrets_provider.set("linkedin_storage_state:existing", json.dumps(FAKE_STORAGE_STATE))
-    db_session.add(
-        LinkedInSessionOrm(
-            account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.VALID,
             last_validated_at=datetime.now(UTC),
         )
@@ -682,21 +600,21 @@ def test_search_jobs_page_delegates_to_injected_callable_with_stored_storage_sta
     result = session_manager.search_jobs_page(account.account_id, "Istanbul", '"Sales"', 2)
 
     assert result == ["<div>card</div>"]
-    assert search_page.calls == [(FAKE_STORAGE_STATE, "Istanbul", '"Sales"', 2)]
+    assert search_page.calls == [(expected_dir, "Istanbul", '"Sales"', 2)]
 
 
 def test_search_jobs_page_returns_empty_list_when_callable_returns_empty(
     db_session: Session,
     account: AccountOrm,
     session_manager: SessionManager,
-    secrets_provider: _FakeSecretsProvider,
+    profile_root: Path,
     search_page,
 ):
-    secrets_provider.set("linkedin_storage_state:existing", json.dumps(FAKE_STORAGE_STATE))
+    (profile_root / str(account.account_id)).mkdir(parents=True)
     db_session.add(
         LinkedInSessionOrm(
             account_id=account.account_id,
-            encrypted_storage_state_ref="linkedin_storage_state:existing",
+            encrypted_storage_state_ref=None,
             session_status=SessionStatus.VALID,
             last_validated_at=datetime.now(UTC),
         )
