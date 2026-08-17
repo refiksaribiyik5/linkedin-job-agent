@@ -39,3 +39,8 @@ backups/
 # yukaridaki duz-dosya varsayilanindan (/secrets.json, dogrudan cli.py/
 # main.py calistirmalari icin) AYRI bir yol oldugu icin AYRICA eklenir.
 /secrets/
+
+# --- Persistent Chromium profili (bkz. docker-compose.yml "browser-profile/"
+# notu) --- secrets/ ile AYNI gerekce: authentication state (cerezler,
+# localStorage, vb.) tasir, ASLA commit edilmemelidir.
+/browser-profile/

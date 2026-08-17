@@ -70,9 +70,28 @@ services:
       CONFIG_DIR: /app/config
       REPORTS_DIR: /app/reports
       SECRETS_FILE: /app/secrets/secrets.json
+      # Persistent Chromium profili (Commit 1 - gercek kullanim Commit 2'de
+      # baslar). BROWSER_PROFILE_DIR, `CONFIG_DIR`/`REPORTS_DIR`/`SECRETS_FILE`
+      # ile AYNI desende: konteyner-ici mutlak yol, asagidaki bind mount'un
+      # hedefiyle birebir eslesir.
+      BROWSER_PROFILE_DIR: /app/browser-profile
+      # VNC_PASSWORD KASITLI OLARAK ZORUNLU (`:?`) DEGIL - `ACCOUNT_ID`/
+      # `LINKEDINBOT_SECRETS_ENCRYPTION_KEY` ile AYNI gerekce: bu servisin
+      # goruntusu `seed`/`config validate`/`run` gibi Xvfb/noVNC'ye hic
+      # ihtiyac duymayan komutlar icin de calistirilir. Bos birakilirsa
+      # entrypoint.sh x11vnc/noVNC'yi (parolasiz VNC sunucusu ACMAK yerine)
+      # KASITLI OLARAK baslatmaz - yalnizca interaktif login denendiginde
+      # (Commit 2) fark edilir/gerekli olur.
+      VNC_PASSWORD: ${VNC_PASSWORD:-}
     depends_on:
       db:
         condition: service_healthy
+    ports:
+      # noVNC - YALNIZCA localhost (127.0.0.1) bind edilir, KESINLIKLE
+      # "6080:6080" (0.0.0.0, tum ag arayuzlerine acik) DEGIL: LinkedIn
+      # login ekrani/kimlik bilgileri gorunecegi icin ayni Wi-Fi/LAN'daki
+      # baska bir cihazin bu porta erisebilmesi kabul edilemez bir risktir.
+      - "127.0.0.1:6080:6080"
     volumes:
       # config/: is kurallarini insan duzenler (TDD Section 27: "mount
       # edilmis config/ dizini uzerinden enjekte edilir").
@@ -91,6 +110,14 @@ services:
       # (Docker Desktop'ta host'tan dogrudan erisilemez, orn. macOS) bu
       # adimi imkansiz kilardi.
       - ./secrets:/app/secrets
+      # browser-profile/: kalici, native Chromium profili (Commit 1 - gercek
+      # kullanim Commit 2'de baslar). secrets/ ile AYNI gerekce (bind mount,
+      # named volume DEGIL): authentication state tasiyacagi icin host'tan
+      # DOGRUDAN erisilebilir/yedeklenebilir/incelenebilir olmasi gerekir;
+      # ayrica bir named volume, container yeniden olusturulsa/silinse bile
+      # bu dizinin host'ta KALICI kalmasini (M11.5 restart-resilience
+      # beklentisiyle tutarli) garanti etmez.
+      - ./browser-profile:/app/browser-profile
     restart: unless-stopped
 
 volumes:
